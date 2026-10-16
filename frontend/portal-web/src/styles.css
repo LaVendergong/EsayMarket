@@ -1,0 +1,49 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: #f7f8fa;
+  color: #323233;
+}
+
+/* 移动端容器：居中并限制宽度，桌面浏览器下也像手机 */
+.app-shell {
+  max-width: 640px;
+  margin: 0 auto;
+  min-height: 100%;
+  background: #f7f8fa;
+  position: relative;
+}
+
+/* 有底部 tabbar / 提交栏的页面留白 */
+.pb-tabbar {
+  padding-bottom: 60px;
+}
+
+.pb-submit {
+  padding-bottom: 64px;
+}
+
+.muted {
+  color: #969799;
+}
+
+.price {
+  color: #ee0a24;
+  font-weight: 600;
+}
+
+.empty {
+  padding: 60px 16px;
+  text-align: center;
+  color: #969799;
+}

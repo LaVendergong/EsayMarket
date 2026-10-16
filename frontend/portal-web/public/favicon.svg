@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Mall 商城">
+  <rect width="64" height="64" rx="14" fill="#ee0a24"/>
+  <path d="M22 26h20v19a5 5 0 0 1-5 5H27a5 5 0 0 1-5-5z" fill="#ffffff"/>
+  <path d="M26 26v-3a6 6 0 0 1 12 0v3" fill="none" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round"/>
+</svg>

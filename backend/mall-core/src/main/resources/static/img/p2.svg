@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600" role="img" aria-label="小米 14">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7a2f16"/>
+      <stop offset="100%" stop-color="#e0832a"/>
+    </linearGradient>
+  </defs>
+  <rect width="600" height="600" fill="url(#bg)"/>
+  <rect x="210" y="150" width="180" height="260" rx="30" fill="#fff3e6"/>
+  <rect x="224" y="166" width="152" height="228" rx="22" fill="#7a2f16"/>
+  <circle cx="300" cy="280" r="46" fill="#e0832a" opacity="0.9"/>
+  <text x="300" y="470" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="40" fill="#ffffff" text-anchor="middle">小米 14</text>
+  <text x="300" y="516" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="26" fill="#ffd9b0" text-anchor="middle">¥3999.00</text>
+  <text x="300" y="566" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="18" fill="#f0c19a" text-anchor="middle">Mall 演示图</text>
+</svg>

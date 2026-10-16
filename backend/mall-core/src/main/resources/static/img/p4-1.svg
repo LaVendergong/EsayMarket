@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600" role="img" aria-label="男士休闲夹克 卡其">
+  <defs>
+    <linearGradient id="bg" x1="1" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#6b5f3a"/>
+      <stop offset="100%" stop-color="#2f3a24"/>
+    </linearGradient>
+  </defs>
+  <rect width="600" height="600" fill="url(#bg)"/>
+  <path d="M300 170 L200 230 L215 420 L385 420 L400 230 Z" fill="#e0cfa4"/>
+  <path d="M300 170 L300 420" stroke="#8a7a4a" stroke-width="6"/>
+  <circle cx="300" cy="270" r="10" fill="#8a7a4a"/>
+  <circle cx="300" cy="330" r="10" fill="#8a7a4a"/>
+  <text x="300" y="478" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="34" fill="#ffffff" text-anchor="middle">M / L 码 卡其</text>
+  <text x="300" y="524" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="26" fill="#e6d9b8" text-anchor="middle">¥399.00</text>
+  <text x="300" y="572" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="18" fill="#cfc09a" text-anchor="middle">Mall 演示图</text>
+</svg>

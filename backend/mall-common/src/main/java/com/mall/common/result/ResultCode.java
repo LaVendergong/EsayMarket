@@ -1,0 +1,46 @@
+package com.mall.common.result;
+
+import lombok.Getter;
+
+/**
+ * 业务返回码
+ */
+@Getter
+public enum ResultCode {
+
+    SUCCESS(200, "操作成功"),
+    FAILED(500, "操作失败"),
+    VALIDATE_FAILED(400, "参数校验失败"),
+    UNAUTHORIZED(401, "暂未登录或 token 已过期"),
+    FORBIDDEN(403, "没有相关权限"),
+    NOT_FOUND(404, "资源不存在"),
+    METHOD_NOT_ALLOWED(405, "请求方法不支持"),
+
+    USERNAME_EXISTS(1001, "用户名已存在"),
+    USER_NOT_FOUND(1002, "用户不存在"),
+    PASSWORD_ERROR(1003, "用户名或密码错误"),
+    ACCOUNT_DISABLED(1004, "账号已被禁用"),
+
+    PRODUCT_NOT_FOUND(2001, "商品不存在"),
+    PRODUCT_OFF_SHELF(2002, "商品已下架"),
+    STOCK_NOT_ENOUGH(2003, "库存不足"),
+    CART_EMPTY(2004, "购物车为空"),
+
+    CATEGORY_NOT_FOUND(2005, "分类不存在"),
+    CATEGORY_HAS_DATA(2006, "分类下存在子分类或商品，无法删除"),
+    SKU_NOT_FOUND(2007, "SKU 不存在"),
+    CATEGORY_NAME_EXISTS(2008, "同级下已存在同名分类"),
+    CART_ITEM_NOT_FOUND(2009, "购物车条目不存在"),
+    ADDRESS_REQUIRED(2010, "请先设置收货地址"),
+
+    ORDER_NOT_FOUND(3001, "订单不存在"),
+    ORDER_STATUS_ERROR(3002, "当前订单状态不允许该操作");
+
+    private final int code;
+    private final String message;
+
+    ResultCode(int code, String message) {
+        this.code = code;
+        this.message = message;
+    }
+}

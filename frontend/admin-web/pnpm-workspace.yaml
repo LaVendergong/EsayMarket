@@ -1,0 +1,4 @@
+# pnpm 11 起，包管理设置从这里读（package.json 里的 "pnpm" 字段已不再生效）
+# esbuild 需要在安装后跑一次构建脚本，否则安装校验会以 ERR_PNPM_IGNORED_BUILDS 失败
+allowBuilds:
+  esbuild: true

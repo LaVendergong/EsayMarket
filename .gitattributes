@@ -1,0 +1,18 @@
+# ============================================================
+# 统一换行符：仓库内一律存 LF（Linux/CI 侧不会踩 CRLF 的坑），
+# 只有 Windows 专用脚本在检出时用 CRLF（更符合 Windows 习惯）。
+#
+# 注意：本项目 scripts\*.ps1 含中文，必须以 UTF-8 **带 BOM** 保存（见 docs §8）；
+# 换行符转换不影响 BOM，但改脚本时别把 BOM 弄丢。
+# ============================================================
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件不要做任何转换
+*.jar binary
+*.png binary
+*.jpg binary
+*.ico binary
