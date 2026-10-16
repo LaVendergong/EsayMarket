@@ -1,17 +1,18 @@
 server:
-  port: 8090
+  port: ${SERVER_PORT:8090}
 spring:
   application:
     name: mall-portal
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
-    username: root
-    password: "521131"
+    url: "${MALL_DB_URL:jdbc:mysql://localhost:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false}"
+    username: ${MALL_DB_USERNAME:root}
+    # 开发默认值；生产用 prod profile（见文件末尾），不给默认值，缺环境变量直接启动失败
+    password: "${MALL_DB_PASSWORD:521131}"
   data:
     redis:
-      host: localhost
-      port: 6379
+      host: ${MALL_REDIS_HOST:localhost}
+      port: ${MALL_REDIS_PORT:6379}
       database: 0
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
@@ -31,14 +32,15 @@ mybatis-plus:
 
 mall:
   jwt:
-    secret: mall-jwt-secret-change-me-please-0123456789abcdef
-    expire-millis: 604800000
+    # 必须与 mall-admin 的 MALL_JWT_SECRET 一致，否则前台签发的 token 后台认不了
+    secret: ${MALL_JWT_SECRET:mall-dev-only-INSECURE-secret-0123456789abcdef}
+    expire-millis: ${MALL_JWT_EXPIRE_MILLIS:604800000}
   order:
     # 未支付订单有效期（分钟），与 mall-admin 保持一致
-    expire-minutes: 30
+    expire-minutes: ${MALL_ORDER_EXPIRE_MINUTES:30}
     timeout-job:
       # 超时关单只在 mall-admin 跑，前台应用关闭
-      enabled: false
+      enabled: ${MALL_ORDER_TIMEOUT_JOB_ENABLED:false}
 
 springdoc:
   api-docs:
@@ -53,3 +55,27 @@ management:
     web:
       exposure:
         include: health,info
+
+# ============================================================
+# 生产 profile：--spring.profiles.active=prod
+#
+# 说明同 mall-admin：这里只关掉接口文档与多余管理端点；
+# 敏感配置的 fail-fast 校验在 com.mall.core.config.ProductionConfigGuard（两个应用共用）。
+# ============================================================
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+knife4j:
+  enable: false
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health

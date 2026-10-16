@@ -1,17 +1,18 @@
 server:
-  port: 8081
+  port: ${SERVER_PORT:8081}
 spring:
   application:
     name: mall-admin
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
-    username: root
-    password: "521131"
+    url: "${MALL_DB_URL:jdbc:mysql://localhost:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false}"
+    username: ${MALL_DB_USERNAME:root}
+    # 开发默认值；生产用 prod profile（见文件末尾），不给默认值，缺环境变量直接启动失败
+    password: "${MALL_DB_PASSWORD:521131}"
   data:
     redis:
-      host: localhost
-      port: 6379
+      host: ${MALL_REDIS_HOST:localhost}
+      port: ${MALL_REDIS_PORT:6379}
       database: 0
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
@@ -31,16 +32,17 @@ mybatis-plus:
 
 mall:
   jwt:
-    secret: mall-jwt-secret-change-me-please-0123456789abcdef
-    expire-millis: 604800000
+    # 开发默认值明确标了 INSECURE；生产走 prod profile 强制注入真实随机值
+    secret: ${MALL_JWT_SECRET:mall-dev-only-INSECURE-secret-0123456789abcdef}
+    expire-millis: ${MALL_JWT_EXPIRE_MILLIS:604800000}
   order:
     # 未支付订单有效期（分钟）：下单时写入 t_order.expire_time
-    expire-minutes: 30
+    expire-minutes: ${MALL_ORDER_EXPIRE_MINUTES:30}
     timeout-job:
       # 超时关单定时任务：只在 mall-admin 打开，避免两个应用重复扫同一批订单
-      enabled: true
+      enabled: ${MALL_ORDER_TIMEOUT_JOB_ENABLED:true}
       # 扫描间隔：开发环境 10 秒便于验证，生产建议调大（如 60000）
-      interval-millis: 10000
+      interval-millis: ${MALL_ORDER_TIMEOUT_JOB_INTERVAL_MILLIS:10000}
 
 springdoc:
   api-docs:
@@ -55,3 +57,31 @@ management:
     web:
       exposure:
         include: health,info
+
+# ============================================================
+# 生产 profile：--spring.profiles.active=prod
+#
+# 这里只做「关掉不该对外暴露的东西」。敏感配置项的 fail-fast 校验**不能只靠 YAML**：
+# Spring Boot 在 @ConfigurationProperties 绑定路径上会把解析不了的占位符原样保留
+# （实测 `${MALL_JWT_SECRET}` 没注入时会变成字面量、应用照样启动），
+# 所以真正的校验在 com.mall.core.config.ProductionConfigGuard —— 它在 prod 下校验
+# mall.jwt.secret / spring.datasource.password 不是空、不是未解析占位符、不是开发默认值，
+# 不满足就让应用启动失败。
+# ============================================================
+---
+spring:
+  config:
+    activate:
+      on-profile: prod
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+knife4j:
+  enable: false
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health

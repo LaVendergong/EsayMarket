@@ -1,19 +1,20 @@
 # Mall 商城一键起：MySQL + 两个后端 + 两个前端
 #
-#   docker compose up -d --build        # 首次（会用 sql/ 下的脚本自动建库+灌演示数据）
-#   docker compose down                 # 停止（保留数据）
-#   docker compose down -v              # 停止并删库（重建时会重新执行 sql/）
+#   cp .env.example .env      # 填好 MYSQL_ROOT_PASSWORD 与 MALL_JWT_SECRET（两个必填）
+#   docker compose up -d --build
+#   docker compose down       # 停止（保留数据）
+#   docker compose down -v    # 停止并删库（重建时会重新执行 sql/）
 #
 # 起来之后的地址：
 #   H5 商城      http://localhost:5174
 #   管理后台     http://localhost:5173    账号 malladmin / admin123456
-#   两个后端接口 :8081 / :8090 （doc.html 是接口文档）
-#   数据库       localhost:3306（root / 见 MYSQL_ROOT_PASSWORD，默认 521131）
+#   两个后端接口 :8081 / :8090
+#   数据库       localhost:3306
 #
 # 说明：
-#   - 不用 Redis。项目引了 starter 但代码里没有任何使用点，实测 /actuator/health 仍是 UP。
-#   - 端口和本地开发保持一致（5173/5174/8081/8090/3306），方便直接对照文档。
-#   - 口令可用环境变量覆盖：MYSQL_ROOT_PASSWORD=xxx docker compose up -d
+#   - 后端跑在 prod profile：敏感项不给默认值（缺环境变量直接启动失败）、关闭接口文档。
+#   - 不用 Redis。项目引了 starter 但代码里没有任何使用点。
+#   - 端口与本地开发一致（5173/5174/8081/8090/3306），方便对照文档。
 
 name: mall
 
@@ -24,7 +25,8 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_general_ci
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-521131}
+      # 必填：没有默认值，缺失时 compose 直接报错，不会用弱口令悄悄起来
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env (see .env.example)}
       MYSQL_DATABASE: mall
     ports:
       - "3306:3306"
@@ -38,6 +40,7 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
+    restart: unless-stopped
 
   mall-admin:
     build:
@@ -46,9 +49,11 @@ services:
         MODULE: mall-admin
     image: mall/mall-admin:1.0.0
     environment:
-      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false"
-      SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-521131}
+      SPRING_PROFILES_ACTIVE: prod
+      MALL_DB_URL: "jdbc:mysql://mysql:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false"
+      MALL_DB_USERNAME: root
+      MALL_DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MALL_JWT_SECRET: ${MALL_JWT_SECRET:?set MALL_JWT_SECRET in .env (see .env.example)}
       # 超时关单定时任务只在 admin 开，避免两个应用重复扫同一批订单
       MALL_ORDER_TIMEOUT_JOB_ENABLED: "true"
     ports:
@@ -65,9 +70,12 @@ services:
         MODULE: mall-portal
     image: mall/mall-portal:1.0.0
     environment:
-      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false"
-      SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-521131}
+      SPRING_PROFILES_ACTIVE: prod
+      MALL_DB_URL: "jdbc:mysql://mysql:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false"
+      MALL_DB_USERNAME: root
+      MALL_DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      # 必须与 mall-admin 完全一致，否则前台签发的 token 后台认不了
+      MALL_JWT_SECRET: ${MALL_JWT_SECRET:?set MALL_JWT_SECRET in .env (see .env.example)}
     ports:
       - "8090:8090"
     depends_on:
