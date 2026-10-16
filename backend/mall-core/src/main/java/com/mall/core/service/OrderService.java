@@ -1,6 +1,7 @@
 package com.mall.core.service;
 
 import com.mall.common.result.PageResult;
+import com.mall.core.model.dto.CreateDirectOrderDTO;
 import com.mall.core.model.dto.CreateOrderDTO;
 import com.mall.core.model.vo.OrderCreateVO;
 import com.mall.core.model.vo.OrderVO;
@@ -9,6 +10,9 @@ public interface OrderService {
 
     /** 结算购物车中「已选中」的条目并生成订单（同时锁定库存） */
     OrderCreateVO create(Long userId, CreateOrderDTO dto);
+
+    /** 「立即购买」：指定 SKU + 数量直接下单，**不读也不写购物车** */
+    OrderCreateVO createDirect(Long userId, CreateDirectOrderDTO dto);
 
     OrderVO detail(Long userId, Long orderId);
 

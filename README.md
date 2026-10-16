@@ -100,7 +100,7 @@ cd frontend/portal-web && pnpm install && pnpm dev   # http://localhost:5174
 ## 验证
 
 ```bash
-# 后端单元测试（37 项，纯内存不需要数据库；build.bat 也默认会跑）
+# 后端单元测试（44 项，纯内存不需要数据库；build.bat 也默认会跑）
 cd backend && mvn -B test
 
 # 下单幂等的真并发验证（22 项断言：同/异 requestId 并发、重试、畸形请求体）

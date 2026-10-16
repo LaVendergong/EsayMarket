@@ -20,6 +20,7 @@ import com.mall.core.mapper.OrderItemMapper;
 import com.mall.core.mapper.OrderMapper;
 import com.mall.core.mapper.ProductMapper;
 import com.mall.core.mapper.SkuMapper;
+import com.mall.core.model.dto.CreateDirectOrderDTO;
 import com.mall.core.model.dto.CreateOrderDTO;
 import com.mall.core.model.vo.OrderCreateVO;
 import com.mall.core.model.vo.OrderItemVO;
@@ -62,6 +63,10 @@ public class OrderServiceImpl implements OrderService {
     /** 客户端生成的幂等键最大长度，与 t_order.request_id 的列定义一致 */
     private static final int MAX_REQUEST_ID_LENGTH = 64;
 
+    /** 下单需要结算的一行：来自购物车选中项，或来自「立即购买」的单个 SKU */
+    private record OrderLine(Long productId, Long skuId, int quantity) {
+    }
+
     @Override
     @Transactional(rollbackFor = Exception.class)
     public OrderCreateVO create(Long userId, CreateOrderDTO dto) {
@@ -77,16 +82,10 @@ public class OrderServiceImpl implements OrderService {
                 // 这里的裸 SQL 是刻意的：只有加锁读才能让并发提交串行化并绕过事务快照
                 .last("FOR UPDATE"));
 
-        // ② 幂等：同一个 requestId（调用方在一次结算里固定不变）已经建过单，直接把那一单还回去。
-        //    同样用 FOR UPDATE：锁定读读的是最新已提交数据，不受本事务快照影响。
-        if (requestId != null) {
-            Order existing = orderMapper.selectOne(Wrappers.<Order>lambdaQuery()
-                    .eq(Order::getUserId, userId)
-                    .eq(Order::getRequestId, requestId)
-                    .last("FOR UPDATE"));
-            if (existing != null) {
-                return OrderCreateVO.from(existing);
-            }
+        // ② 幂等：同一个 requestId 已经建过单就把那一单还回去
+        Order existing = findIdempotentOrder(userId, requestId);
+        if (existing != null) {
+            return OrderCreateVO.from(existing);
         }
 
         if (carts.isEmpty()) {
@@ -94,30 +93,93 @@ public class OrderServiceImpl implements OrderService {
         }
         Address address = resolveAddress(userId, dto == null ? null : dto.getAddressId());
 
-        List<OrderItem> items = new ArrayList<>(carts.size());
-        BigDecimal total = BigDecimal.ZERO;
+        List<OrderLine> lines = new ArrayList<>(carts.size());
         for (Cart c : carts) {
             int qty = c.getQuantity() == null ? 0 : c.getQuantity();
             if (qty < 1) {
                 throw new BusinessException(ResultCode.VALIDATE_FAILED, "购买数量不合法");
             }
-            Product p = productMapper.selectById(c.getProductId());
+            lines.add(new OrderLine(c.getProductId(), c.getSkuId(), qty));
+        }
+
+        OrderCreateVO vo = placeOrder(userId, requestId, address, lines);
+        // 下单成功后移除购物车里已结算的（选中的）条目
+        cartMapper.deleteChecked(userId);
+        return vo;
+    }
+
+    /**
+     * 「立即购买」：指定 SKU + 数量直接下单，**完全不读也不写购物车**。
+     *
+     * <p>在此之前 H5 的立即购买是「先把该 SKU 加购，再把购物车其它条目取消勾选」绕出来的，
+     * 会破坏用户原有的勾选。这个入口才是正确做法。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public OrderCreateVO createDirect(Long userId, CreateDirectOrderDTO dto) {
+        if (dto == null || dto.getSkuId() == null) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED, "skuId 不能为空");
+        }
+        int qty = dto.getQuantity() == null ? 1 : dto.getQuantity();
+        if (qty < 1) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED, "购买数量不合法");
+        }
+        String requestId = normalizeRequestId(dto.getRequestId());
+
+        Order existing = findIdempotentOrder(userId, requestId);
+        if (existing != null) {
+            return OrderCreateVO.from(existing);
+        }
+
+        Address address = resolveAddress(userId, dto.getAddressId());
+        Sku sku = skuMapper.selectById(dto.getSkuId());
+        if (sku == null) {
+            throw new BusinessException(ResultCode.SKU_NOT_FOUND);
+        }
+        return placeOrder(userId, requestId, address, List.of(new OrderLine(sku.getProductId(), sku.getId(), qty)));
+    }
+
+    /**
+     * 幂等命中查询：按 (userId, requestId) 找已建的单。
+     *
+     * <p>用 FOR UPDATE 而不是普通查询——锁定读读的是**最新已提交数据**，不受本事务快照影响；
+     * 并发重复提交时，后到者才能看到前者刚刚提交的那一单（普通查询可能读到旧快照而查不到）。
+     */
+    private Order findIdempotentOrder(Long userId, String requestId) {
+        if (requestId == null) {
+            return null;
+        }
+        return orderMapper.selectOne(Wrappers.<Order>lambdaQuery()
+                .eq(Order::getUserId, userId)
+                .eq(Order::getRequestId, requestId)
+                .last("FOR UPDATE"));
+    }
+
+    /**
+     * 真正建单：校验商品/SKU → 原子锁库存 → 落订单与明细 → 快照收货信息。
+     * 购物车相关的事（读选中项、清选中项）由调用方处理，所以这个方法被两个入口共用。
+     */
+    private OrderCreateVO placeOrder(Long userId, String requestId, Address address, List<OrderLine> lines) {
+        List<OrderItem> items = new ArrayList<>(lines.size());
+        BigDecimal total = BigDecimal.ZERO;
+        for (OrderLine line : lines) {
+            Product p = productMapper.selectById(line.productId());
             if (p == null) {
                 throw new BusinessException(ResultCode.PRODUCT_NOT_FOUND);
             }
             if (p.getStatus() == null || p.getStatus() == 0) {
                 throw new BusinessException(ResultCode.PRODUCT_OFF_SHELF, "商品已下架：" + p.getName());
             }
-            Sku sku = skuMapper.selectById(c.getSkuId());
+            Sku sku = skuMapper.selectById(line.skuId());
             if (sku == null || !Objects.equals(sku.getProductId(), p.getId())) {
                 throw new BusinessException(ResultCode.SKU_NOT_FOUND);
             }
             // 防超卖的关键：条件 UPDATE 原子锁库存，失败即回滚整单
-            if (skuMapper.lockStock(sku.getId(), qty) == 0) {
+            if (skuMapper.lockStock(sku.getId(), line.quantity()) == 0) {
                 throw new BusinessException(ResultCode.STOCK_NOT_ENOUGH, "库存不足：" + p.getName());
             }
             BigDecimal lineAmount = sku.getPrice() == null ? BigDecimal.ZERO
-                    : sku.getPrice().multiply(BigDecimal.valueOf(qty)).setScale(2, RoundingMode.HALF_UP);
+                    : sku.getPrice().multiply(BigDecimal.valueOf(line.quantity())).setScale(2, RoundingMode.HALF_UP);
             OrderItem item = new OrderItem();
             item.setProductId(p.getId());
             item.setSkuId(sku.getId());
@@ -125,7 +187,7 @@ public class OrderServiceImpl implements OrderService {
             item.setProductImage(StringUtils.hasText(sku.getImage()) ? sku.getImage() : p.getMainImage());
             item.setSpec(sku.getSpec());
             item.setPrice(sku.getPrice());
-            item.setQuantity(qty);
+            item.setQuantity(line.quantity());
             item.setTotalAmount(lineAmount);
             items.add(item);
             total = total.add(lineAmount);
@@ -148,8 +210,6 @@ public class OrderServiceImpl implements OrderService {
             item.setOrderNo(order.getOrderNo());
             orderItemMapper.insert(item);
         }
-        // 下单成功后移除购物车里已结算的（选中的）条目
-        cartMapper.deleteChecked(userId);
         return OrderCreateVO.from(order);
     }
 

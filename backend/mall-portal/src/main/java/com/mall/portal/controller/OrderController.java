@@ -2,6 +2,7 @@ package com.mall.portal.controller;
 
 import com.mall.common.result.PageResult;
 import com.mall.common.result.R;
+import com.mall.core.model.dto.CreateDirectOrderDTO;
 import com.mall.core.model.dto.CreateOrderDTO;
 import com.mall.core.model.vo.OrderCreateVO;
 import com.mall.core.model.vo.OrderVO;
@@ -30,6 +31,12 @@ public class OrderController {
     @PostMapping
     public R<OrderCreateVO> create(@RequestBody(required = false) CreateOrderDTO dto) {
         return R.ok(orderService.create(UserContext.requireUserId(), dto));
+    }
+
+    @Operation(summary = "「立即购买」直连下单（指定 SKU + 数量，不经过购物车）")
+    @PostMapping("/direct")
+    public R<OrderCreateVO> createDirect(@RequestBody CreateDirectOrderDTO dto) {
+        return R.ok(orderService.createDirect(UserContext.requireUserId(), dto));
     }
 
     @Operation(summary = "我的订单分页（status 可选）")

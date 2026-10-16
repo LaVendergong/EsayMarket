@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { showSuccessToast, showToast } from 'vant'
-import { addressApi, cartApi, orderApi } from '@/api'
+import { addressApi, cartApi, orderApi, productApi } from '@/api'
 import { cart } from '@/stores/cart'
 import type { AddressVO, CartVO } from '@/types'
 import { money } from '@/utils/format'
 
+const route = useRoute()
 const router = useRouter()
 
 /**
@@ -24,6 +25,22 @@ function newRequestId(): string {
 
 const requestId = ref(newRequestId())
 
+/**
+ * 「立即购买」入口：商品详情页会带 ?productId=&skuId=&quantity= 跳过来。
+ * 有这些参数时走 /portal/order/direct 直连下单，**不读也不写购物车** ——
+ * 老实现是「先加购再把其它条目取消勾选」绕出来的，会破坏用户原有的勾选。
+ */
+const direct = computed(() => {
+  const skuId = Number(route.query.skuId)
+  if (!route.query.skuId || !Number.isFinite(skuId) || skuId <= 0) return null
+  return {
+    productId: Number(route.query.productId) || 0,
+    skuId,
+    quantity: Math.max(Number(route.query.quantity) || 1, 1)
+  }
+})
+const isDirect = computed(() => direct.value !== null)
+
 const addresses = ref<AddressVO[]>([])
 const addressId = ref<number | undefined>(undefined)
 const items = ref<CartVO[]>([])
@@ -35,9 +52,35 @@ const total = computed(() => items.value.reduce((s, c) => s + Number(c.totalPric
 const fullAddress = (a: AddressVO) => [a.province, a.city, a.district, a.detail].filter(Boolean).join('')
 
 async function load() {
-  const [addrList, cartList] = await Promise.all([addressApi.list(), cartApi.list()])
+  const addrList = await addressApi.list()
   addresses.value = addrList
   addressId.value = (addrList.find((a) => a.isDefault === 1) ?? addrList[0])?.id
+
+  const d0 = direct.value
+  if (d0) {
+    const detail = await productApi.detail(d0.productId)
+    const sku = detail.skus.find((s) => s.id === d0.skuId)
+    // 借用 CartVO 的形状复用下面的清单 UI（id 在这里用不到，填 0）
+    items.value = sku
+      ? [
+          {
+            id: 0,
+            productId: detail.id,
+            skuId: sku.id,
+            productName: detail.name,
+            productImage: sku.image || detail.mainImage,
+            spec: sku.spec,
+            price: sku.price,
+            quantity: d0.quantity,
+            checked: 1,
+            totalPrice: Number((Number(sku.price) * d0.quantity).toFixed(2))
+          }
+        ]
+      : []
+    return
+  }
+
+  const cartList = await cartApi.list()
   items.value = cartList.filter((c) => c.valid && c.checked === 1)
 }
 
@@ -57,12 +100,16 @@ async function submit() {
   }
   submitting.value = true
   try {
-    const vo = await orderApi.create(addressId.value, requestId.value)
-    await cart.refresh()
+    const d = direct.value
+    const vo = d
+      ? await orderApi.createDirect(d.skuId, d.quantity, addressId.value, requestId.value)
+      : await orderApi.create(addressId.value, requestId.value)
+    // 直连下单没动购物车，没必要刷角标
+    if (!isDirect.value) await cart.refresh()
     showSuccessToast('下单成功')
     router.replace(`/order/${vo.orderId}`)
   } catch {
-    // 拦截器已提示（没有默认地址 -> 2010，购物车为空 -> 2004）
+    // 拦截器已提示（没有默认地址 -> 2010，购物车为空 -> 2004，库存不足 -> 2003）
   } finally {
     submitting.value = false
   }

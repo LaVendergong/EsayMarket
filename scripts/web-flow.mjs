@@ -319,6 +319,61 @@ try {
   const finished = await waitFor(pageHas('已完成'), 8000)
   check('确认收货成功，状态=已完成', finished && sql(`SELECT status FROM t_order WHERE id = ${orderId};`) === '3', `db status=${sql(`SELECT status FROM t_order WHERE id = ${orderId};`)}（期望 3）`)
 
+  // ================================================================ H5：立即购买（直连下单，不碰购物车）
+  log('')
+  log('--- H5：立即购买（不破坏购物车勾选） ---')
+  const apiToken = (await api('POST', `${PORTAL_API}/api/portal/auth/login`, {
+    body: { username: BUYER, password: BUYER_PWD }
+  })).data?.token
+  // 本脚本前面一直按 product_id 定位，这里要用 sku_id 直接加购/直连下单，所以补一次查询
+  const skuId = Number(sql(`SELECT id FROM t_sku WHERE product_id = ${prodId} LIMIT 1;`))
+  info(`测试商品 skuId=${skuId}`)
+
+  // 先在购物车放一件并【取消勾选】：老实现是「先加购再把其它条目取消勾选」绕出来的，
+  // 只有让购物车处于「有货但未勾选」的状态，才能验出新老行为的差异
+  const addResp = await api('POST', `${PORTAL_API}/api/portal/cart`, {
+    body: { skuId, quantity: 1 },
+    token: apiToken
+  })
+  const cartBefore = (await api('GET', `${PORTAL_API}/api/portal/cart`, { token: apiToken })).data
+  check('预备：购物车里放进 1 件', addResp.code === 200 && cartBefore.length === 1, `addCode=${addResp.code} size=${cartBefore.length}`)
+  await api('PUT', `${PORTAL_API}/api/portal/cart/${cartBefore[0].id}/checked?checked=0`, { token: apiToken })
+  const cartPre = (await api('GET', `${PORTAL_API}/api/portal/cart`, { token: apiToken })).data
+  info(`购物车预备状态：size=${cartPre.length} checked=${cartPre[0]?.checked}（期望 1 / 0）`)
+
+  await goto(`${PORTAL_WEB}/#/product/${prodId}`, 3500)
+  await waitSel('.van-action-bar-button')
+  await clickSelector('.van-stepper__plus') // 数量 1 -> 2，用来区分「直连下单」和「购物车那件（1 件）」
+  await clickText('.van-action-bar-button', '立即购买')
+  const onCo2 = await waitFor(onRoute('checkout'), 8000)
+  const co2Ready = await waitText('应付金额')
+  const co2Text = await innerText()
+  check(
+    '立即购买进入确认订单页（购物车未勾选也能下单）',
+    onCo2 && co2Ready && co2Text.includes(ITEM),
+    `hash=${await evalJs('location.hash')} 含商品=${co2Text.includes(ITEM)}`
+  )
+
+  await clickText('.van-submit-bar__button', '提交订单')
+  const onOrder2 = await waitFor(onRoute('order/'), 10000)
+  const order2Ready = await waitText('待支付')
+  check('立即购买下单成功（订单详情显示待支付）', onOrder2 && order2Ready, `hash=${await evalJs('location.hash')}`)
+
+  // 订单金额按步进器的 2 件算（100 x 2），并且带上了幂等键
+  const directOrderId = Number(sql(`SELECT id FROM t_order WHERE user_id = ${buyerId} ORDER BY id DESC LIMIT 1;`))
+  const directRow = sql(`SELECT CONCAT(pay_amount, ',', IFNULL(request_id, '')) FROM t_order WHERE id = ${directOrderId};`)
+  const [directAmount, directReqId] = directRow.split(',')
+  check('立即购买订单金额 = 数量 x 单价（200.00）', directAmount === '200.00', `pay_amount=${directAmount}`)
+  check('立即购买订单带幂等键 requestId', !!directReqId, `request_id=${directReqId ? 'set' : '(空)'}`)
+
+  // 核心：直连下单必须完全没有动购物车
+  const cartAfter = (await api('GET', `${PORTAL_API}/api/portal/cart`, { token: apiToken })).data
+  check(
+    '立即购买没有破坏购物车原有的勾选',
+    cartAfter.length === 1 && cartAfter[0].checked === 0 && cartAfter[0].skuId === skuId,
+    `size=${cartAfter.length} checked=${cartAfter[0]?.checked} skuId=${cartAfter[0]?.skuId}`
+  )
+
   // ================================================================ 收尾核对
   log('')
   log('--- 收尾核对 ---')

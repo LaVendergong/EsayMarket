@@ -68,6 +68,10 @@ export const orderApi = {
    */
   create: (addressId?: number, requestId?: string) =>
     http.post<never, OrderCreateVO>('/portal/order', { addressId, requestId }),
+
+  /** 「立即购买」：指定 SKU + 数量直接下单，不经过购物车 */
+  createDirect: (skuId: number, quantity: number, addressId?: number, requestId?: string) =>
+    http.post<never, OrderCreateVO>('/portal/order/direct', { skuId, quantity, addressId, requestId }),
   page: (params: { pageNum: number; pageSize: number; status?: number }) =>
     http.get<never, PageResult<OrderVO>>('/portal/order/page', { params }),
   detail: (id: number) => http.get<never, OrderVO>(`/portal/order/${id}`),

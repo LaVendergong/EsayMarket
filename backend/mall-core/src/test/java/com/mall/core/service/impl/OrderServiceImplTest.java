@@ -15,6 +15,7 @@ import com.mall.core.mapper.OrderItemMapper;
 import com.mall.core.mapper.OrderMapper;
 import com.mall.core.mapper.ProductMapper;
 import com.mall.core.mapper.SkuMapper;
+import com.mall.core.model.dto.CreateDirectOrderDTO;
 import com.mall.core.model.dto.CreateOrderDTO;
 import com.mall.core.model.vo.OrderCreateVO;
 import com.mall.core.service.AddressService;
@@ -38,6 +39,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -139,6 +141,14 @@ class OrderServiceImplTest {
     private CreateOrderDTO dtoWithAddress(long addressId) {
         CreateOrderDTO dto = new CreateOrderDTO();
         dto.setAddressId(addressId);
+        return dto;
+    }
+
+    private CreateDirectOrderDTO directDto(long skuId, int quantity) {
+        CreateDirectOrderDTO dto = new CreateDirectOrderDTO();
+        dto.setSkuId(skuId);
+        dto.setQuantity(quantity);
+        dto.setAddressId(9L);
         return dto;
     }
 
@@ -306,6 +316,107 @@ class OrderServiceImplTest {
 
         assertThat(codeOf(e)).isEqualTo(ResultCode.CART_EMPTY.getCode());
         verify(orderMapper, never()).selectOne(any());
+    }
+
+    // ============================================================ createDirect（立即购买）
+    @Test
+    void createDirect_withoutSkuId_isRejectedBeforeAnythingHappens() {
+        CreateDirectOrderDTO dto = new CreateDirectOrderDTO();
+
+        BusinessException e = catchThrowableOfType(() -> service.createDirect(1L, dto), BusinessException.class);
+
+        assertThat(codeOf(e)).isEqualTo(ResultCode.VALIDATE_FAILED.getCode());
+        verifyNoInteractions(cartMapper);
+    }
+
+    @Test
+    void createDirect_withNonPositiveQuantity_isRejected() {
+        CreateDirectOrderDTO dto = directDto(100L, 0);
+
+        BusinessException e = catchThrowableOfType(() -> service.createDirect(1L, dto), BusinessException.class);
+
+        assertThat(codeOf(e)).isEqualTo(ResultCode.VALIDATE_FAILED.getCode());
+    }
+
+    @Test
+    void createDirect_withUnknownSku_isRejected() {
+        when(addressService.getOwned(1L, 9L)).thenReturn(address());
+        // skuMapper.selectById 未打桩 -> 返回 null
+
+        BusinessException e = catchThrowableOfType(() -> service.createDirect(1L, directDto(999L, 1)), BusinessException.class);
+
+        assertThat(codeOf(e)).isEqualTo(ResultCode.SKU_NOT_FOUND.getCode());
+        verify(orderMapper, never()).insert(any(Order.class));
+    }
+
+    @Test
+    void createDirect_withOffShelfProduct_isRejected() {
+        when(addressService.getOwned(1L, 9L)).thenReturn(address());
+        when(skuMapper.selectById(100L)).thenReturn(sku(100L, 10L, "30.00", 5));
+        when(productMapper.selectById(10L)).thenReturn(product(10L, 0));
+
+        BusinessException e = catchThrowableOfType(() -> service.createDirect(1L, directDto(100L, 1)), BusinessException.class);
+
+        assertThat(codeOf(e)).isEqualTo(ResultCode.PRODUCT_OFF_SHELF.getCode());
+        verify(skuMapper, never()).lockStock(anyLong(), anyInt());
+    }
+
+    @Test
+    void createDirect_whenStockLockFails_isRejected() {
+        when(addressService.getOwned(1L, 9L)).thenReturn(address());
+        when(skuMapper.selectById(100L)).thenReturn(sku(100L, 10L, "30.00", 1));
+        when(productMapper.selectById(10L)).thenReturn(product(10L, 1));
+        when(skuMapper.lockStock(100L, 3)).thenReturn(0);
+
+        BusinessException e = catchThrowableOfType(() -> service.createDirect(1L, directDto(100L, 3)), BusinessException.class);
+
+        assertThat(codeOf(e)).isEqualTo(ResultCode.STOCK_NOT_ENOUGH.getCode());
+        verify(orderMapper, never()).insert(any(Order.class));
+    }
+
+    @Test
+    void createDirect_happyPath_placesTheOrderWithoutTouchingTheCart() {
+        when(addressService.getOwned(1L, 9L)).thenReturn(address());
+        when(skuMapper.selectById(100L)).thenReturn(sku(100L, 10L, "30.00", 5));
+        when(productMapper.selectById(10L)).thenReturn(product(10L, 1));
+        when(skuMapper.lockStock(100L, 2)).thenReturn(1);
+        when(orderMapper.insert(any(Order.class))).thenAnswer(invocation -> {
+            invocation.getArgument(0, Order.class).setId(500L);
+            return 1;
+        });
+
+        OrderCreateVO vo = service.createDirect(1L, directDto(100L, 2));
+
+        assertThat(vo.getOrderId()).isEqualTo(500L);
+        assertThat(vo.getPayAmount()).isEqualByComparingTo("60.00");
+        assertThat(vo.getStatus()).isEqualTo(OrderStatus.UNPAID.getCode());
+
+        ArgumentCaptor<OrderItem> itemCaptor = ArgumentCaptor.forClass(OrderItem.class);
+        verify(orderItemMapper).insert(itemCaptor.capture());
+        assertThat(itemCaptor.getValue().getSkuId()).isEqualTo(100L);
+        assertThat(itemCaptor.getValue().getQuantity()).isEqualTo(2);
+        assertThat(itemCaptor.getValue().getTotalAmount()).isEqualByComparingTo("60.00");
+
+        verify(skuMapper).lockStock(100L, 2);
+        // 本功能的核心：立即购买不读也不写购物车（不会破坏用户原有的勾选）
+        verify(cartMapper, never()).selectList(any());
+        verify(cartMapper, never()).deleteChecked(anyLong());
+    }
+
+    @Test
+    void createDirect_withReusedRequestId_returnsTheExistingOrderWithoutLockingStock() {
+        Order existing = order(700L, OrderStatus.UNPAID.getCode(), LocalDateTime.now().plusMinutes(10));
+        existing.setRequestId("direct-1");
+        when(orderMapper.selectOne(any())).thenReturn(existing);
+
+        CreateDirectOrderDTO dto = directDto(100L, 2);
+        dto.setRequestId("direct-1");
+
+        OrderCreateVO vo = service.createDirect(1L, dto);
+
+        assertThat(vo.getOrderId()).isEqualTo(700L);
+        verify(orderMapper, never()).insert(any(Order.class));
+        verify(skuMapper, never()).lockStock(anyLong(), anyInt());
     }
 
     // ================================================================== pay

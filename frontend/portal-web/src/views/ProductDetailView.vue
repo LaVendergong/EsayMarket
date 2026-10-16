@@ -70,30 +70,28 @@ async function addToCart() {
 }
 
 /**
- * 立即购买：后端下单只结算「购物车中已选中」的条目，
- * 所以这里先把本 SKU 加购，再把其它条目取消选中（会覆盖用户之前在购物车里的勾选，属于已知取舍）。
+ * 立即购买：跳到确认订单页并带上「买哪个 SKU、几件」。
+ *
+ * 走的是 /portal/order/direct 直连下单，**不读也不写购物车**，
+ * 所以不会像老实现那样把用户购物车里原有的勾选改掉。
  */
-async function buyNow() {
+function buyNow() {
   if (!selected.value) {
     showToast('请选择规格')
     return
   }
-  submitting.value = true
-  try {
-    const skuId = selected.value.id
-    await cartApi.add(skuId, quantity.value)
-    const list = await cartApi.list()
-    for (const c of list) {
-      const want = c.skuId === skuId && c.valid ? 1 : 0
-      if (c.checked !== want) await cartApi.updateChecked(c.id, want)
-    }
-    await cart.refresh()
-    router.push('/checkout')
-  } catch {
-    // 拦截器已提示
-  } finally {
-    submitting.value = false
+  if (selected.value.availableStock <= 0) {
+    showFailToast('该规格无货')
+    return
   }
+  router.push({
+    path: '/checkout',
+    query: {
+      productId: String(product.value?.id ?? ''),
+      skuId: String(selected.value.id),
+      quantity: String(quantity.value)
+    }
+  })
 }
 
 onMounted(load)
