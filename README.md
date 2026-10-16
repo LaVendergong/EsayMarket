@@ -33,11 +33,19 @@ mall/
 ### 方式一：Docker Compose（最省事）
 
 ```bash
+cp .env.example .env      # 填 MYSQL_ROOT_PASSWORD 与 MALL_JWT_SECRET（都是必填，没有默认值）
 docker compose up -d --build
 ```
 
 MySQL 首次启动时会自动执行 `sql/` 下的 V1→V4（建表 + 演示数据 + 后台账号），无需手动初始化。
 起完直接开 http://localhost:5174 。停止用 `docker compose down`（加 `-v` 连数据一起删）。
+
+密钥生成方式（`.env.example` 里也有）：
+
+```bash
+openssl rand -hex 32
+# PowerShell: -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
+```
 
 > ⚠️ 本机开发环境没有 Docker，这套编排**只做了语法与结构校验，没有实际跑过**。
 
@@ -85,6 +93,9 @@ cd frontend/portal-web && pnpm install && pnpm dev   # http://localhost:5174
 ## 验证
 
 ```bash
+# 后端单元测试（28 项，纯内存不需要数据库；build.bat 也默认会跑）
+cd backend && mvn -B test
+
 # 商品域端到端（36 项断言）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1
 
@@ -108,6 +119,27 @@ node scripts/web-flow.mjs
 > **为什么需要它们**：`pnpm build` / `vue-tsc` 对前端覆盖有限——实测有 3 个前端 bug 它们全绿
 > （Vant 4 已无 `GoodsAction`、漏写 `onMounted(load)`、同路由换参数组件被复用），都是真渲染才发现。
 > 详见 `docs/AI-HANDOFF.md` §8 第 20~22 条。
+
+## 上线
+
+用 `prod` profile 启动（`SPRING_PROFILES_ACTIVE=prod` 或 `--spring.profiles.active=prod`），并且**必须**通过环境变量注入：
+
+| 环境变量 | 说明 |
+|---|---|
+| `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致**，至少 32 字符 |
+| `MALL_DB_PASSWORD` | 数据库口令（两个后端一致） |
+| `MALL_DB_URL` / `MALL_DB_USERNAME` | 数据库连接（默认 localhost / root） |
+
+prod 下的行为差异：
+
+- 关闭 springdoc / knife4j 接口文档与 `/actuator/info`，只保留 `health`
+- 启动时执行 `ProductionConfigGuard` 自检：密钥若为空、是未解析的占位符、是开发默认值或长度不足，
+  **应用直接启动失败**，不会带着弱密钥跑起来
+
+> 这个自检是必需的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把解析不了的占位符
+> **原样保留而不是报错**，只靠 YAML 写 `${MALL_JWT_SECRET}` 拦不住（详见 `docs/AI-HANDOFF.md` §8 第 26 条）。
+
+CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V4、两个前端 typecheck+build。
 
 ## 几个必须知道的坑
 

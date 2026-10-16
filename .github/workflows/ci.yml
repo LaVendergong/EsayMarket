@@ -1,0 +1,91 @@
+name: CI
+
+# 每次 push / PR 都跑：
+#   1. backend        —— 编译 + 单元测试（纯内存，不需要数据库）
+#   2. sql-migrations —— 在全新的 MySQL 上把 V1..V4 按顺序跑一遍（等价于 docker 的 initdb 流程）
+#   3. frontend       —— 两个前端的类型检查 + 生产构建
+#
+# 说明：本机没有 Docker/GitHub Actions 环境，这个工作流**没有在 CI 上实际跑过**，
+#       但其中每条命令都在本机验证过（mvn -B test / pnpm typecheck / pnpm build / SQL 顺序）。
+#       端到端验证（scripts/p2-verify.ps1、p3-verify.ps1、web-check.mjs、web-flow.mjs）
+#       目前依赖 Windows 专用路径与本地已启动的服务，还没搬进 CI，属于待办。
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    name: backend (compile + unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: mvn verify
+        run: mvn -B -f backend/pom.xml verify
+
+  sql-migrations:
+    name: sql migrations on a fresh MySQL
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - name: install mysql client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mysql-client
+      - name: apply V1..V4 in order, then check the demo data landed
+        run: |
+          set -e
+          for f in sql/V1__schema.sql sql/V2__add_user_role.sql sql/V3__seed_demo.sql sql/V4__order_index.sql; do
+            echo "== applying $f"
+            mysql -h 127.0.0.1 -uroot -pci-root-password --default-character-set=utf8mb4 < "$f"
+          done
+          echo "== counts"
+          mysql -h 127.0.0.1 -uroot -pci-root-password -N --default-character-set=utf8mb4 \
+            -e "USE mall; SELECT CONCAT('products=', COUNT(*)) FROM t_product;"
+          mysql -h 127.0.0.1 -uroot -pci-root-password -N --default-character-set=utf8mb4 \
+            -e "USE mall; SELECT CONCAT('admins=', COUNT(*)) FROM t_user WHERE role = 1;"
+          mysql -h 127.0.0.1 -uroot -pci-root-password -N --default-character-set=utf8mb4 \
+            -e "USE mall; SELECT CONCAT('expire_index=', COUNT(*)) FROM information_schema.statistics WHERE table_schema='mall' AND index_name='idx_status_expire';"
+
+  frontend:
+    name: frontend (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: |
+            frontend/admin-web/pnpm-lock.yaml
+            frontend/portal-web/pnpm-lock.yaml
+      - name: admin-web
+        working-directory: frontend/admin-web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm build
+      - name: portal-web
+        working-directory: frontend/portal-web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm build

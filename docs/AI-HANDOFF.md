@@ -158,13 +158,63 @@ pnpm typecheck    # vue-tsc 类型检查（vite build 本身不做类型检查�
 - 登录态放 localStorage（admin 用 `mall_admin_token`，H5 用 `mall_portal_token`），都是 hash 路由。
 - 两个 dev server 都只监听本机；生产部署 `pnpm build` 产物丢任意静态服务器即可（hash 路由，不用配 rewrite）。
 
+### 4.2 构建、单元测试与 CI
+
+`build.bat` **默认会跑单元测试**（纯内存，不需要数据库、大概 3 秒）。要跳过就显式传参：
+
+```bash
+cmd.exe /c "D:\projects\mall\build.bat" clean install              # 构建 + 单元测试
+cmd.exe /c "D:\projects\mall\build.bat" clean install -DskipTests  # 跳过测试
+```
+
+单跑测试（服务在跑也不影响，它不碰 jar）：
+
+```bash
+cd D:\projects\mall\backend
+mvn -B test
+```
+
+现有单元测试（**28 项**，覆盖「错了会造成钱/库存问题」的分支）：
+
+| 测试类 | 覆盖 |
+|---|---|
+| `mall-common` `JwtUtilTest`（5） | 签发/解析往返、换密钥解不开、过期与篡改被拒、过短密钥直接报错 |
+| `mall-core` `ProductionConfigGuardTest`（10） | prod 下拒绝开发默认密钥 / 未解析占位符 / 空值 / 长度不足；dev 不受影响 |
+| `mall-core` `OrderServiceImplTest`（13） | 下单：空车 2004、无地址 2010、下架 2002、锁库存失败 2003、正常下单的金额/地址快照/清购物车且**不计销量**；支付：超时拒付、状态被抢先流转时幂等拒绝、成功扣库存且**同商品多 SKU 销量合并**、扣库存失败 2003；取消释放锁定库存、重复取消被拒、越权看到 3001、超时关单跳过已被别人处理的单 |
+
+CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在全新 MySQL 上按顺序跑 V1..V4**、两个前端 typecheck+build。
+⚠️ **本机没有 GitHub Actions 环境，这个工作流没在 CI 上实际跑过**，但其中每条命令都在本机验证过。
+端到端四套（p2/p3/web-check/web-flow）目前依赖 Windows 专用路径与本地已启动的服务，**还没搬进 CI**，属于待办。
+
+### 4.3 配置与上线（prod profile）
+
+敏感配置一律走环境变量，**代码和 compose 里不留真实值**：
+
+| 环境变量 | 说明 | 开发默认值 |
+|---|---|---|
+| `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致** | `mall-dev-only-INSECURE-…`（明确标了不安全） |
+| `MALL_DB_URL` / `MALL_DB_USERNAME` / `MALL_DB_PASSWORD` | 数据库连接 | localhost / root / `521131` |
+| `MALL_ORDER_EXPIRE_MINUTES` | 未支付订单有效期 | 30 |
+| `MALL_ORDER_TIMEOUT_JOB_ENABLED` / `_INTERVAL_MILLIS` | 超时关单任务开关与间隔 | admin true / portal false；10 秒 |
+| `SERVER_PORT` | 服务端口 | 8081 / 8090 |
+
+上线方式：`--spring.profiles.active=prod`（或 `SPRING_PROFILES_ACTIVE=prod`）。prod 下：
+
+- 关闭 springdoc / knife4j 接口文档与 `/actuator/info`，只留 `health`
+- 启动时执行 `com.mall.core.config.ProductionConfigGuard` 自检：JWT 密钥必须**非空、不是未解析的占位符、不是开发默认值、长度 ≥ 32**，
+  数据库口令必须非空且不是未解析占位符；不满足**直接启动失败**（不会带着弱密钥跑起来）
+
+> ⚠️ 这个自检不是多余的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把**解析不了的占位符原样保留**（不报错），
+> 光靠 YAML 写 `${MALL_JWT_SECRET}` 是拦不住的 —— 详见 §8 第 26 条。
+
 ---
 
 ## 5. 数据库
 
 - MySQL 8，服务名 **MySQL80**，监听 **3306**
 - 库名 **`mall`**
-- 账号 **`root`**，密码在 `backend/mall-admin/src/main/resources/application.yml` 和 `mall-portal` 的同名文件里（两个文件必须一致）
+- 账号 **`root`**，口令走环境变量 `MALL_DB_PASSWORD`（开发默认值 `521131`，见 §4.3）；
+  **两个应用必须用同一个口令**，生产由 `ProductionConfigGuard` 在启动时兜底校验
 - 客户端：`C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe`
 
 表（8 张）：`t_user`、`t_address`、`t_category`、`t_product`、`t_sku`、`t_cart`、`t_order`、`t_order_item`
@@ -286,6 +336,7 @@ Knife4j：服务起来后访问 `http://localhost:<port>/doc.html`
 | P3 | 购物车 + 订单：下单 / 库存扣减（防超卖）/ 订单状态机 / 超时关单 | ✅ 完成并验证（61/61） |
 | P4 | 前端：管理后台（Element Plus）+ H5 商城（Vant） | ✅ 两个工程均完成（构建/类型检查/接口冒烟全通过） |
 | P5 | 收尾：接口文档 / README / Docker Compose / 演示数据 | ✅ 完成（Docker 部分本机无 Docker，只做了离线校验） |
+| P6 | 上线准备：版本控制 / 密钥外部化 / 单元测试 / CI / 生产加固 | 🟡 进行中 |
 
 ### P1 验证结果（可作为回归基线）
 
@@ -436,6 +487,20 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 脚本自带清理：**开跑前先删上次残留、跑完删本次数据**（`Web 流程测试*` / `webflow1` 前缀），
 用独立测试商品，不碰演示数据，可反复执行。最后一次：**29/29 通过**。
 
+### 上线准备（P6）进度
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| 版本控制 | ✅ | `git init`（分支 `main`）+ `.gitignore` / `.gitattributes`；首次提交 180 个文件，`target/`、`node_modules/`、`dist/`、`logs/`、`tmp/` 均已排除 |
+| 密钥 / 口令外部化 | ✅ | 见 §4.3；prod profile + `ProductionConfigGuard` 启动自检（验证 10/10，见 `tmp\p0\config-report.txt`） |
+| 后端单元测试 | ✅ | 28 项，`build.bat` 默认执行，见 §4.2 |
+| CI | ✅ | `.github/workflows/ci.yml`（3 个 job；**未在真实 CI 上跑过**） |
+| 下单幂等（防重复订单/重复锁库存） | ⬜ | 待做 |
+| 「立即购买」直连下单接口 | ⬜ | 待做（去掉覆盖购物车勾选的取舍） |
+| 超时关单单点 / Redis 死依赖 | ⬜ | 待做 |
+| 前端全局错误兜底 + UI 库按需引入 | ⬜ | 待做 |
+| 生产加固（CORS 白名单 / 登录限流 / traceId / 接口版本） | ⬜ | 待做 |
+
 ### P5 收尾验证（接口文档 / 演示数据 / Docker 编排）
 
 **接口文档** —— 证据 `tmp\p5\verify.txt`：
@@ -524,6 +589,22 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 25. **别把自己的断言错误当成产品 bug**：实测踩过一次——H5 详情页数量步进器默认 1，测试没点「+」就去加购，
     然后断言「购物车 ¥200.00 / locked=2」，实际是 ¥100.00 / locked=1。
     正确的处理是**把步进器也纳入用例**（点一下 `+` 再断言），而不是把期望值改小——后者会让测试失去覆盖。
+26. **Spring Boot 在 `@ConfigurationProperties` 绑定路径上，对「解析不了的占位符」是原样保留、不报错**，
+    和 `@Value` 的行为完全不同。实测：配置写 `mall.jwt.secret: ${MALL_JWT_SECRET}` 且不设环境变量时，
+    应用**照样启动**，密钥变成字面量 `"${MALL_JWT_SECRET}"`，数据库口令同理 → 直到连库才以
+    `Access denied for user 'root'@'localhost' (using password: YES)` 这种**指向完全错误方向**的错误暴露出来。
+    根因是 `PropertySourcesPlaceholdersResolver` 构造 `PropertyPlaceholderHelper` 时用了
+    `ignoreUnresolvablePlaceholders = true`。
+    → **结论：敏感配置的缺失必须在启动时显式校验**（见 `ProductionConfigGuard`），不能指望 YAML 占位符抛异常。
+27. **写单测时 `MockEnvironment` 与真实 Environment 行为不同**：`MockEnvironment.getProperty("x")` 会把 `${VAR}`
+    拿去解析、解析不到直接抛 `IllegalArgumentException`；而真实环境是第 26 条那样原样保留。
+    要测「guard 碰到未解析占位符该怎么办」这类逻辑，得用 Mockito 直接喂给它真实会看到的值，别用 `MockEnvironment`。
+    另外：**别手数字符串长度**——我把一个 32 字符的串当成 31 字符去测「长度不足」，白跑一轮；
+    用 `"x".repeat(n)` 这种写法让长度一眼可见。
+28. **`write_to_file` 写出的 `.ps1` 没有 BOM**，而 Windows PowerShell 5.1 会按 GBK 解析无 BOM 文件 —— 只要脚本里
+    出现中文，后面的引号就可能被吞掉，报 `Unexpected token ')'` 之类（§8 第 11 条同一个坑）。
+    → 给自动化脚本的规矩：**一律写纯 ASCII**（要输出的中文由被测对象提供，不要写在脚本字面量里）。
+    本次就在 `tmp\p0\verify-config.ps1` 上踩了一次。
 
 ---
 
@@ -538,8 +619,9 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 5. 起服务：cmd.exe /c "D:\projects\mall\run.bat"
 6. 验证  ：grep "Started Mall.*Application" logs/*.log
           再用 curl 落盘验证接口（见 §7 基线）；商品域跑 scripts\p2-verify.ps1，购物车/订单域跑 scripts\p3-verify.ps1
-7. 动了前端：起两个 dev server，先 node scripts\web-check.mjs（页面渲染），再 node scripts\web-flow.mjs（全流程闭环）
-8. 更新本文件的 §7 进度表
+7. 动了后端：mvn -B test（28 项单元测试；build.bat 也会跑）
+8. 动了前端：起两个 dev server，先 node scripts\web-check.mjs（页面渲染），再 node scripts\web-flow.mjs（全流程闭环）
+9. 更新本文件的 §7 进度表
 ```
 
 ---
