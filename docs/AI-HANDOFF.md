@@ -791,6 +791,18 @@ Element Plus 的中文语言包改由根组件 `<el-config-provider :locale="zhC
 35. **错误边界只放在根组件会把导航一起顶掉**：用户除了点「刷新」无处可去。
     正确做法是**布局内容区再放一层**（`AdminLayout` / `TabLayout` 的 `router-view`）：
     页面异常由内层接住、外壳（侧边栏/Tabbar）保留；布局自身出错才轮到根那层。
+36. **这台机器上 `git push` 到 GitHub 会被连接重置**（`Recv failure: Connection was reset` /
+    `Failed to connect to github.com:443 after 21s`），但同一时刻 `Test-NetConnection github.com -p 443`、
+    `Invoke-WebRequest https://github.com`、GitHub API 全都是正常的 200 —— 说明是 git 传输层被拦，
+    不是网络不通。**绕过办法**（实测有效，缺一不可）：
+
+    ```bash
+    git -c http.version=HTTP/1.1 -c http.sslBackend=openssl push origin main
+    ```
+
+    只加 `http.version=HTTP/1.1` 仍然失败；换成 openssl 后端才通。**不要改全局 git 配置**，每次带上参数即可。
+    另外这台机器到 GitHub 的**读**连接也间歇性失败（`ls-remote` 时通时不通），重试即可——
+    真正的判据是 push 自己打印的 `xxx..yyy  main -> main`，以及随后 `git status -sb` 不再显示 `ahead N`。
 
 ---
 
