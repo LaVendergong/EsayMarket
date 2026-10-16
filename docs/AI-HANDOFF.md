@@ -11,7 +11,8 @@
 用户 → 商品 → 购物车 → 下单 → 模拟支付，外加管理后台。
 
 - **代码位置**：`D:\projects\mall`（Windows 路径） = `/mnt/d/projects/mall`（WSL 路径）
-- 技术栈：Spring Boot 3.2.5 / Java 17 / MyBatis-Plus 3.5.7 / MySQL 8 / Redis / Knife4j 4.5.0 / jjwt 0.12.5
+- 技术栈：Spring Boot 3.2.5 / Java 17 / MyBatis-Plus 3.5.7 / MySQL 8 / Knife4j 4.5.0 / jjwt 0.12.5
+  （**没有 Redis**：原先引了 starter 但零使用点，P6 已把依赖删掉，见 §7「P1 超时关单 / Redis」）
 - 前端（尚未开始）：Vue3 + Vite + TypeScript + pnpm，管理后台用 Element Plus，H5 用 Vant
 
 ---
@@ -23,7 +24,7 @@
 ```
 Windows 11（主机名 Administrator）
 ├── IntelliJ IDEA 2026.2.1      <- 人在用，别乱杀进程
-├── 本地 MySQL 8 (3306)；Redis (6379) **未安装也未使用**（只引了 starter，Java 代码里没有 Redis 使用点，缺了不影响启动）
+├── 本地 MySQL 8 (3306)；**不需要 Redis**（原先只引了 starter、零使用点，P6 已把依赖移除；本地也从来没装过）
 ├── Windows 工具链（JDK / Maven / Node）
 └── WSL2 (Ubuntu 26.04)          <- OpenClaw Gateway 跑在这里
     └── 通过 OpenClaw Windows 节点 "Windows Node (ADINISTRATOR)" 操作 Windows 侧
@@ -99,6 +100,7 @@ D:\projects\mall\
 │   ├── p2-verify.ps1             P2 商品域端到端验证（36 项断言）
 │   ├── p3-verify.ps1             P3 购物车+订单端到端验证（61 项断言，含并发防超卖与超时关单）
 │   ├── idempotency-verify.ps1    下单幂等的真并发验证（22 项断言：同/异 requestId 并发、重试、畸形体）
+│   ├── timeout-job-verify.ps1    超时关单验证（18 项断言：单应用能关 + 两应用只关一次）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -198,7 +200,7 @@ CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在�
 | `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致** | `mall-dev-only-INSECURE-…`（明确标了不安全） |
 | `MALL_DB_URL` / `MALL_DB_USERNAME` / `MALL_DB_PASSWORD` | 数据库连接 | localhost / root / `521131` |
 | `MALL_ORDER_EXPIRE_MINUTES` | 未支付订单有效期 | 30 |
-| `MALL_ORDER_TIMEOUT_JOB_ENABLED` / `_INTERVAL_MILLIS` | 超时关单任务开关与间隔 | admin true / portal false；10 秒 |
+| `MALL_ORDER_TIMEOUT_JOB_ENABLED` / `_INTERVAL_MILLIS` | 超时关单任务开关与间隔 | **两个应用都是 true**；10 秒 |
 | `SERVER_PORT` | 服务端口 | 8081 / 8090 |
 
 上线方式：`--spring.profiles.active=prod`（或 `SPRING_PROFILES_ACTIVE=prod`）。prod 下：
@@ -500,7 +502,7 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 | CI | ✅ | `.github/workflows/ci.yml`（3 个 job；**未在真实 CI 上跑过**） |
 | 下单幂等（防重复订单/重复锁库存） | ✅ | 见下方「P1 下单幂等」；`scripts\idempotency-verify.ps1` 22/22 |
 | 「立即购买」直连下单接口 | ✅ | 见下方「P1 立即购买」；`web-flow` 35/35 |
-| 超时关单单点 / Redis 死依赖 | ⬜ | 待做 |
+| 超时关单单点 / Redis 死依赖 | ✅ | 见下方「P1 超时关单 / Redis」；`timeout-job-verify.ps1` 18/18 |
 
 ### P1 立即购买（35/35）
 
@@ -529,6 +531,34 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 
 另有单元测试 7 项（`OrderServiceImplTest` 17 → 24）：缺 skuId / 数量非法 / SKU 不存在 / 商品下架 /
 锁库存失败 / 正常下单**且断言 `cartMapper` 零交互** / 幂等键命中直接返回原单。
+
+### P1 超时关单 / Redis（18/18）
+
+**问题 1：超时关单单点。** `OrderTimeoutTask` 原先只在 mall-admin 开（portal 那边
+`mall.order.timeout-job.enabled=false`）。admin 挂了或没启动，超时订单就**永远不关**、锁定库存**永远不释放**。
+
+**解决**：两个应用都默认开启。**并发重复扫描是安全的**——关单走「带 from 状态的条件 UPDATE」，
+只有把 status 从 0 改成 4 成功的那个实例才会去释放库存，另一个拿到 0 行直接跳过
+（`OrderServiceImplTest#closeExpiredOrders_skipsOrdersSomeoneElseAlreadyHandled` 就是守这条）。
+代价只是几次空扫描，比单点丢库存划算。真要单点跑，把另一边的 `enabled` 设成 false 即可。
+
+**验证**：`scripts\timeout-job-verify.ps1`（**18/18**，产物 `tmp\p1-timeout\summary.txt`）。它自己停/起应用，分三段：
+
+| 阶段 | 断言 |
+|---|---|
+| A 只起 portal（admin 停着） | 过期订单仍被 portal 关掉、锁定库存释放回 0、日志里恰好 1 次关闭 —— **这条是修复的核心**（改之前 portal 根本不跑这个任务） |
+| B 两个应用同时扫 | 同一单仍然**只被关一次**（把两个日志里的 `closed N` 求和 == 1） |
+| C 只起 admin（portal 停着） | 对称证明 admin 也在跑这个任务（订单先在两个应用都活着时建好，再停 portal、最后才让它过期） |
+
+计数依据是日志行 `[timeout-job] closed N expired unpaid order(s)`：这行刻意保持 ASCII 且格式稳定，
+因为它是唯一会被脚本解析的日志（见 §8 第 31 条）。
+
+**问题 2：Redis 是死依赖。** 全项目零使用点，但 `mall-core` 引了 `spring-boot-starter-data-redis` + `commons-pool2`，
+两个 yml 还配着 `spring.data.redis`。
+
+**解决：删掉。** 没用到的依赖 = 多一份升级负担与攻击面，将来真要做缓存再带着目的加回来。
+（本来考虑用 Redis 做超时关单的分布式锁，但订单状态的条件 UPDATE 已经保证了幂等，MySQL 也已经是硬依赖，
+没必要为此引入一个中间件。）
 | 前端全局错误兜底 + UI 库按需引入 | ⬜ | 待做 |
 | 生产加固（CORS 白名单 / 登录限流 / traceId / 接口版本） | ⬜ | 待做 |
 
@@ -682,6 +712,9 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 30. **HTTP 层的「客户端错误」也要算 400，别让它掉进 500 兜底**：畸形请求体抛的是
     `HttpMessageNotReadableException`，原本被 `Exception` 兜底成 **code 500** —— 上线后 5xx 会被当成服务端故障来告警，
     把客户端错误算进服务端错误率。已在 `GlobalExceptionHandler` 单独处理成 400。
+31. **会被自动化脚本解析的日志行要刻意保持稳定**：`OrderTimeoutTask` 的
+    `[timeout-job] closed N expired unpaid order(s)` 是 `timeout-job-verify.ps1` 用来断言
+    「同一单只关一次」的依据，所以这一行**保持 ASCII、不轻易改前缀与措辞**（同文件其它日志行仍是中文，不受影响）。
 
 ---
 
@@ -696,7 +729,8 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 5. 起服务：cmd.exe /c "D:\projects\mall\run.bat"
 6. 验证  ：grep "Started Mall.*Application" logs/*.log
           再用 curl 落盘验证接口（见 §7 基线）；商品域跑 scripts\p2-verify.ps1，购物车/订单域跑 scripts\p3-verify.ps1，
-          动了下单链路再跑 scripts\idempotency-verify.ps1（真并发幂等）
+          动了下单链路再跑 scripts\idempotency-verify.ps1（真并发幂等）；动了超时关单再跑
+          scripts\timeout-job-verify.ps1（单应用能关 + 两应用只关一次）
 7. 动了后端：mvn -B test（28 项单元测试；build.bat 也会跑）
 8. 动了前端：起两个 dev server，先 node scripts\web-check.mjs（页面渲染），再 node scripts\web-flow.mjs（全流程闭环）
 9. 更新本文件的 §7 进度表

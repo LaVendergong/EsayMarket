@@ -9,11 +9,6 @@ spring:
     username: ${MALL_DB_USERNAME:root}
     # 开发默认值；生产用 prod profile（见文件末尾），不给默认值，缺环境变量直接启动失败
     password: "${MALL_DB_PASSWORD:521131}"
-  data:
-    redis:
-      host: ${MALL_REDIS_HOST:localhost}
-      port: ${MALL_REDIS_PORT:6379}
-      database: 0
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
     time-zone: GMT+8
@@ -39,8 +34,10 @@ mall:
     # 未支付订单有效期（分钟），与 mall-admin 保持一致
     expire-minutes: ${MALL_ORDER_EXPIRE_MINUTES:30}
     timeout-job:
-      # 超时关单只在 mall-admin 跑，前台应用关闭
-      enabled: ${MALL_ORDER_TIMEOUT_JOB_ENABLED:false}
+      # 超时关单两个应用都开：只在一个应用跑的话，它挂了订单就永远不关、锁定库存永不释放。
+      # 并发重复扫描是安全的（关单走条件 UPDATE，只有成功那次才释放库存）。
+      enabled: ${MALL_ORDER_TIMEOUT_JOB_ENABLED:true}
+      interval-millis: ${MALL_ORDER_TIMEOUT_JOB_INTERVAL_MILLIS:10000}
 
 springdoc:
   api-docs:

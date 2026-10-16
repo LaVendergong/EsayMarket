@@ -106,6 +106,9 @@ cd backend && mvn -B test
 # 下单幂等的真并发验证（22 项断言：同/异 requestId 并发、重试、畸形请求体）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/idempotency-verify.ps1
 
+# 超时关单验证（18 项断言：单应用能关 + 两应用同跑只关一次；会自己停/起后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/timeout-job-verify.ps1
+
 # 商品域端到端（36 项断言）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1
 
@@ -115,7 +118,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p3-verify.ps1
 # 前端页面渲染检查（15 项断言 + 控制台告警零容忍；需要 Chrome + 前后端都已启动）
 node scripts/web-check.mjs
 
-# 前端全流程交互测试（29 项断言：真点按钮跑完整个购物闭环）
+# 前端全流程交互测试（35 项断言：真点按钮跑完整个购物闭环，含「立即购买」）
 node scripts/web-flow.mjs
 ```
 
@@ -143,6 +146,9 @@ node scripts/web-flow.mjs
 prod 下的行为差异：
 
 - 关闭 springdoc / knife4j 接口文档与 `/actuator/info`，只保留 `health`
+- 超时关单定时任务**两个后端都默认开启**：只在一个应用跑的话，它挂了超时订单就永远不关、锁定库存永不释放。
+  并发重复扫描是安全的（关单走条件 UPDATE，只有成功那次才释放库存）。要单点跑就把另一边的
+  `MALL_ORDER_TIMEOUT_JOB_ENABLED` 设成 `false`
 - 启动时执行 `ProductionConfigGuard` 自检：密钥若为空、是未解析的占位符、是开发默认值或长度不足，
   **应用直接启动失败**，不会带着弱密钥跑起来
 
