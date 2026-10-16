@@ -90,13 +90,15 @@ D:\projects\mall\
 │   ├── V1__schema.sql            建库建表（8 张表）
 │   ├── V2__add_user_role.sql     t_user 加 role 列
 │   ├── V3__seed_demo.sql         演示数据（分类/商品/SKU + 后台账号），幂等可重复执行
-│   └── V4__order_index.sql       t_order 加 idx_status_expire（超时关单扫描用），幂等
+│   ├── V4__order_index.sql       t_order 加 idx_status_expire（超时关单扫描用），幂等
+│   └── V5__order_request_id.sql  t_order 加 request_id 列与 uk_user_request（下单幂等），幂等
 ├── sqlschema.sql            ⚠️ 初版建表脚本（无 role 列），已被 sql\ 取代，勿用
 ├── scripts\
 │   ├── e2e-lib.ps1               验证公用库（Http-Json / Check / Invoke-Mysql / Start-MallApps / Save-Summary），被 p2/p3 脚本 dot-source
 │   ├── stop-apps.ps1             停止脚本（PID 文件 → 命令行 → 端口 → 日志 PID，四重兜底）
 │   ├── p2-verify.ps1             P2 商品域端到端验证（36 项断言）
 │   ├── p3-verify.ps1             P3 购物车+订单端到端验证（61 项断言，含并发防超卖与超时关单）
+│   ├── idempotency-verify.ps1    下单幂等的真并发验证（22 项断言：同/异 requestId 并发、重试、畸形体）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -174,13 +176,14 @@ cd D:\projects\mall\backend
 mvn -B test
 ```
 
-现有单元测试（**28 项**，覆盖「错了会造成钱/库存问题」的分支）：
+现有单元测试（**37 项**，覆盖「错了会造成钱/库存问题」的分支）：
 
 | 测试类 | 覆盖 |
 |---|---|
 | `mall-common` `JwtUtilTest`（5） | 签发/解析往返、换密钥解不开、过期与篡改被拒、过短密钥直接报错 |
+| `mall-common` `GlobalExceptionHandlerTest`（5） | 业务异常保留自己的码；**畸形请求体/缺参数 → 400 而不是 500**；方法不支持 → 真 405；未知异常 → 500 |
 | `mall-core` `ProductionConfigGuardTest`（10） | prod 下拒绝开发默认密钥 / 未解析占位符 / 空值 / 长度不足；dev 不受影响 |
-| `mall-core` `OrderServiceImplTest`（13） | 下单：空车 2004、无地址 2010、下架 2002、锁库存失败 2003、正常下单的金额/地址快照/清购物车且**不计销量**；支付：超时拒付、状态被抢先流转时幂等拒绝、成功扣库存且**同商品多 SKU 销量合并**、扣库存失败 2003；取消释放锁定库存、重复取消被拒、越权看到 3001、超时关单跳过已被别人处理的单 |
+| `mall-core` `OrderServiceImplTest`（17） | 下单：空车 2004、无地址 2010、下架 2002、锁库存失败 2003、正常下单的金额/地址快照/清购物车且**不计销量**、**幂等键命中直接返回原单且不动库存**、requestId 过长 400；支付：超时拒付、状态被抢先流转时幂等拒绝、成功扣库存且**同商品多 SKU 销量合并**、扣库存失败 2003；取消释放锁定库存、重复取消被拒、越权看到 3001、超时关单跳过已被别人处理的单 |
 
 CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在全新 MySQL 上按顺序跑 V1..V4**、两个前端 typecheck+build。
 ⚠️ **本机没有 GitHub Actions 环境，这个工作流没在 CI 上实际跑过**，但其中每条命令都在本机验证过。
@@ -241,7 +244,7 @@ CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在�
 mysql -uroot -p*** -N --default-character-set=utf8mb4 -e "source D:/projects/mall/sql/V3__seed_demo.sql"
 ```
 
-> 换库重建的顺序：`V1__schema.sql` → `V2__add_user_role.sql` → `V3__seed_demo.sql` → `V4__order_index.sql`。
+> 换库重建的顺序：`V1__schema.sql` → `V2__add_user_role.sql` → `V3__seed_demo.sql` → `V4__order_index.sql` → `V5__order_request_id.sql`。
 > 文件名统一 `V<N>__` 前缀就是为了这个顺序——`docker-entrypoint-initdb.d` 按**文件名**排序执行，
 > 而 ASCII 里大写 `V` 排在小写 `s` 前面，所以叫 `schema.sql` 会被排到最后、建表顺序就反了。
 > 根目录的 `sqlschema.sql` 是初版（缺 role 列），**不要再用**。
@@ -495,11 +498,47 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 | 密钥 / 口令外部化 | ✅ | 见 §4.3；prod profile + `ProductionConfigGuard` 启动自检（验证 10/10，见 `tmp\p0\config-report.txt`） |
 | 后端单元测试 | ✅ | 28 项，`build.bat` 默认执行，见 §4.2 |
 | CI | ✅ | `.github/workflows/ci.yml`（3 个 job；**未在真实 CI 上跑过**） |
-| 下单幂等（防重复订单/重复锁库存） | ⬜ | 待做 |
+| 下单幂等（防重复订单/重复锁库存） | ✅ | 见下方「P1 下单幂等」；`scripts\idempotency-verify.ps1` 22/22 |
 | 「立即购买」直连下单接口 | ⬜ | 待做（去掉覆盖购物车勾选的取舍） |
 | 超时关单单点 / Redis 死依赖 | ⬜ | 待做 |
 | 前端全局错误兜底 + UI 库按需引入 | ⬜ | 待做 |
 | 生产加固（CORS 白名单 / 登录限流 / traceId / 接口版本） | ⬜ | 待做 |
+
+### P1 下单幂等（22/22）
+
+**问题**：`create()` 原本是「读购物车选中项 → 锁库存 → 建单 → 清选中项」。双击提交 / 网络重试 / 多标签页时，
+两个请求会**都读到同一批选中项**，各建一单、各锁一次库存 —— 库存不会超卖（SKU 条件 UPDATE 兜住了），
+但会**凭空多占库存**并产生**重复订单**。
+
+**解决（两层，互相兜底）**：
+
+1. **购物车行锁**：`cartMapper.selectList(... .last("FOR UPDATE"))`。同一用户的并发提交在第一步就串行化：
+   后到者要等前者提交，而**锁定读总是读最新已提交数据**（不受事务快照影响），于是它看到选中项已被清空 → 2004。
+2. **幂等键**：`t_order.request_id` + `uk_user_request (user_id, request_id)`（见 `sql\V5__order_request_id.sql`）。
+   调用方在**一次结算**里固定不变地传同一个值；命中已有单就直接把那一单返回（同一个 orderId）。
+   唯一键取 `(user_id, request_id)` 而不是单列 `request_id`，是为了避免「两个用户传了同一个 requestId →
+   按 user 查不到、插入又撞键 → 500」。
+   不传 requestId 时退化为普通下单（靠第 1 层兜底），老客户端不受影响。
+
+前端：`CheckoutView` 在组件挂载时生成一个 requestId，重试提交沿用同一个（离开再回来会重新挂载 → 换新键）。
+⚠️ `crypto.randomUUID()` **只在安全上下文（https / localhost）可用**，手机用局域网 IP 打开 H5 时它是 undefined，
+代码里有兜底实现，别删。
+
+**验证**：`scripts\idempotency-verify.ps1`（22/22，产物 `tmp\p1-idem\summary.txt`）。
+用 `HttpClient.PostAsync` 不 await 制造真并发（一次跑两个、再一起收结果）：
+
+| 用例 | 断言 |
+|---|---|
+| A 同 requestId 并发 2 次 | 两次都 200、返回**同一个** orderId、库里只 1 行、库存只锁一次（+2） |
+| B 不同 requestId 并发 | 恰好一个 200、一个 2004、只多 1 单、库存只锁一次（+3） |
+| C 顺序重试同 requestId | 返回原单、无新单、库存不变 |
+| D 完全不传 requestId 并发 | 仍然只 1 单（第 1 层兜底生效） |
+| E requestId 超 64 字符 | 400，且在拿锁之前就被拒 |
+| F 畸形请求体（字符串形式的 JSON） | 400（**修复前是 500**，见下） |
+
+**顺带修掉一个真实缺陷**：客户端发畸形请求体时，`HttpMessageNotReadableException` 会落到 `Exception` 兜底里
+变成 **code 500** —— 把**客户端的错算进了服务端错误率**，上线后会误导告警。已在 `GlobalExceptionHandler`
+里单独处理成 400，并加 `GlobalExceptionHandlerTest` 守住。
 
 ### P5 收尾验证（接口文档 / 演示数据 / Docker 编排）
 
@@ -605,6 +644,16 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
     出现中文，后面的引号就可能被吞掉，报 `Unexpected token ')'` 之类（§8 第 11 条同一个坑）。
     → 给自动化脚本的规矩：**一律写纯 ASCII**（要输出的中文由被测对象提供，不要写在脚本字面量里）。
     本次就在 `tmp\p0\verify-config.ps1` 上踩了一次。
+29. **`e2e-lib.ps1` 的两个使用陷阱**（各浪费了我一轮排查）：
+    - `Payload $resp` 返回的是 `body.data`（**整个对象**）。登录接口必须写 `(Payload $resp).token`；
+      直接把返回值当 token 用，会带着一个畸形的 `Authorization` 头请求 → 后端按**未认证**处理，返回 **HTTP 401 且 body 为空**。
+      症状是「响应体全空、后续拿到的 id 全是 0」，很容易误判成权限或建表问题。
+    - `Http-Json -Body` 内部会 `ConvertTo-Json`，所以**只能传 hashtable**；传已经序列化好的 JSON **字符串**会被
+      **二次编码**成 `"{\"addressId\":1}"`，服务端报 `Cannot construct instance of ... CreateOrderDTO`。
+      需要发原始字符串时走 `Start-RaceOrder` 那种直接用 `HttpClient` 的路径。
+30. **HTTP 层的「客户端错误」也要算 400，别让它掉进 500 兜底**：畸形请求体抛的是
+    `HttpMessageNotReadableException`，原本被 `Exception` 兜底成 **code 500** —— 上线后 5xx 会被当成服务端故障来告警，
+    把客户端错误算进服务端错误率。已在 `GlobalExceptionHandler` 单独处理成 400。
 
 ---
 
@@ -618,7 +667,8 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
           → 看 build.log 里的 BUILD SUCCESS / BUILD_EXIT=0
 5. 起服务：cmd.exe /c "D:\projects\mall\run.bat"
 6. 验证  ：grep "Started Mall.*Application" logs/*.log
-          再用 curl 落盘验证接口（见 §7 基线）；商品域跑 scripts\p2-verify.ps1，购物车/订单域跑 scripts\p3-verify.ps1
+          再用 curl 落盘验证接口（见 §7 基线）；商品域跑 scripts\p2-verify.ps1，购物车/订单域跑 scripts\p3-verify.ps1，
+          动了下单链路再跑 scripts\idempotency-verify.ps1（真并发幂等）
 7. 动了后端：mvn -B test（28 项单元测试；build.bat 也会跑）
 8. 动了前端：起两个 dev server，先 node scripts\web-check.mjs（页面渲染），再 node scripts\web-flow.mjs（全流程闭环）
 9. 更新本文件的 §7 进度表

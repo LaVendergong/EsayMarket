@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS t_cart (
 CREATE TABLE IF NOT EXISTS t_order (
     id BIGINT NOT NULL AUTO_INCREMENT,
     order_no VARCHAR(64) NOT NULL,
+    request_id VARCHAR(64) DEFAULT NULL COMMENT '下单幂等键（客户端生成，见 V5__order_request_id.sql）',
     user_id BIGINT NOT NULL,
     total_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     pay_amount DECIMAL(10,2) NOT NULL DEFAULT 0.00,
@@ -122,6 +123,7 @@ CREATE TABLE IF NOT EXISTS t_order (
     deleted TINYINT NOT NULL DEFAULT 0,
     PRIMARY KEY (id),
     UNIQUE KEY uk_order_no (order_no),
+    UNIQUE KEY uk_user_request (user_id, request_id),
     KEY idx_user (user_id),
     KEY idx_status (status)
 ) ENGINE = InnoDB COMMENT ='订单';

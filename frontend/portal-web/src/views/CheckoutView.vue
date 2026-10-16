@@ -9,6 +9,21 @@ import { money } from '@/utils/format'
 
 const router = useRouter()
 
+/**
+ * 下单幂等键：一次结算页会话内固定不变，所以网络抖动重试 / 手快双击都只会落一单。
+ * 离开结算页再回来会重新挂载组件（根 router-view 带 :key），自然拿到新的键。
+ *
+ * 注意 crypto.randomUUID 只在安全上下文（https / localhost）才有——手机用局域网 IP
+ * 打开 H5 时它是 undefined，必须有兜底，否则真机上直接白屏报错。
+ */
+function newRequestId(): string {
+  const c = window.crypto
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID()
+  return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+const requestId = ref(newRequestId())
+
 const addresses = ref<AddressVO[]>([])
 const addressId = ref<number | undefined>(undefined)
 const items = ref<CartVO[]>([])
@@ -42,7 +57,7 @@ async function submit() {
   }
   submitting.value = true
   try {
-    const vo = await orderApi.create(addressId.value)
+    const vo = await orderApi.create(addressId.value, requestId.value)
     await cart.refresh()
     showSuccessToast('下单成功')
     router.replace(`/order/${vo.orderId}`)

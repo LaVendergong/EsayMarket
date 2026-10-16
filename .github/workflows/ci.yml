@@ -50,7 +50,7 @@ jobs:
       - name: apply V1..V4 in order, then check the demo data landed
         run: |
           set -e
-          for f in sql/V1__schema.sql sql/V2__add_user_role.sql sql/V3__seed_demo.sql sql/V4__order_index.sql; do
+          for f in sql/V1__schema.sql sql/V2__add_user_role.sql sql/V3__seed_demo.sql sql/V4__order_index.sql sql/V5__order_request_id.sql; do
             echo "== applying $f"
             mysql -h 127.0.0.1 -uroot -pci-root-password --default-character-set=utf8mb4 < "$f"
           done

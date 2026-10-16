@@ -59,13 +59,36 @@ public class OrderServiceImpl implements OrderService {
     private final AddressService addressService;
     private final OrderProperties orderProperties;
 
+    /** 客户端生成的幂等键最大长度，与 t_order.request_id 的列定义一致 */
+    private static final int MAX_REQUEST_ID_LENGTH = 64;
+
     @Override
     @Transactional(rollbackFor = Exception.class)
     public OrderCreateVO create(Long userId, CreateOrderDTO dto) {
+        String requestId = normalizeRequestId(dto == null ? null : dto.getRequestId());
+
+        // ① 先锁住「该用户已选中的购物车行」。同一用户并发的两次提交会在这里被串行化：
+        //    后到的那次要等前者提交，而锁定读（FOR UPDATE）总是读最新已提交数据，
+        //    于是它会看到选中项已被清空，不会再建第二单、也不会重复锁库存。
         List<Cart> carts = cartMapper.selectList(Wrappers.<Cart>lambdaQuery()
                 .eq(Cart::getUserId, userId)
                 .eq(Cart::getChecked, 1)
-                .orderByAsc(Cart::getId));
+                .orderByAsc(Cart::getId)
+                // 这里的裸 SQL 是刻意的：只有加锁读才能让并发提交串行化并绕过事务快照
+                .last("FOR UPDATE"));
+
+        // ② 幂等：同一个 requestId（调用方在一次结算里固定不变）已经建过单，直接把那一单还回去。
+        //    同样用 FOR UPDATE：锁定读读的是最新已提交数据，不受本事务快照影响。
+        if (requestId != null) {
+            Order existing = orderMapper.selectOne(Wrappers.<Order>lambdaQuery()
+                    .eq(Order::getUserId, userId)
+                    .eq(Order::getRequestId, requestId)
+                    .last("FOR UPDATE"));
+            if (existing != null) {
+                return OrderCreateVO.from(existing);
+            }
+        }
+
         if (carts.isEmpty()) {
             throw new BusinessException(ResultCode.CART_EMPTY);
         }
@@ -109,6 +132,7 @@ public class OrderServiceImpl implements OrderService {
         }
 
         Order order = new Order();
+        order.setRequestId(requestId);
         order.setUserId(userId);
         order.setTotalAmount(total);
         order.setPayAmount(total);
@@ -331,6 +355,19 @@ public class OrderServiceImpl implements OrderService {
     private String nextOrderNo() {
         return ORDER_NO_FORMAT.format(LocalDateTime.now())
                 + String.format("%06d", ThreadLocalRandom.current().nextInt(1_000_000));
+    }
+
+    /** 幂等键规整：空白视为「不传」；过长直接拒绝，不要等落到数据库才报错 */
+    private String normalizeRequestId(String requestId) {
+        if (!StringUtils.hasText(requestId)) {
+            return null;
+        }
+        String trimmed = requestId.trim();
+        if (trimmed.length() > MAX_REQUEST_ID_LENGTH) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED,
+                    "requestId 最长 " + MAX_REQUEST_ID_LENGTH + " 个字符");
+        }
+        return trimmed;
     }
 
     /** 撞唯一键说明单号重复：换号重试，避免把 DuplicateKeyException 漏成 500 */

@@ -59,6 +59,7 @@ mysql -uroot -p --default-character-set=utf8mb4 -e "source sql/V1__schema.sql"
 mysql -uroot -p --default-character-set=utf8mb4 -e "source sql/V2__add_user_role.sql"
 mysql -uroot -p --default-character-set=utf8mb4 -e "source sql/V3__seed_demo.sql"
 mysql -uroot -p --default-character-set=utf8mb4 -e "source sql/V4__order_index.sql"
+mysql -uroot -p --default-character-set=utf8mb4 -e "source sql/V5__order_request_id.sql"
 
 # 2) 后端（Windows 下也可直接 build.bat / run.bat）
 cd backend && mvn clean install && cd ..
@@ -90,11 +91,20 @@ cd frontend/portal-web && pnpm install && pnpm dev   # http://localhost:5174
 统一返回 `R<T>`：**业务失败时 HTTP 状态码仍是 200**，错误码在 `body.code` 里；只有未认证才是真正的 HTTP 401。
 详见 `docs/AI-HANDOFF.md` §6.1。
 
+### 下单幂等（客户端必读）
+
+`POST /api/portal/order` 支持 `requestId` 字段（可选，最长 64 字符）。**同一次结算里请固定不变地传同一个值**
+（例如一个 UUID），这样重复提交（双击 / 网络重试）只会落一单，并返回原来那一单的 `orderId`。
+不传也能保证不会并发重复下单（服务端有购物车行锁兜底），只是重试时会返回「购物车为空」而不是原单。
+
 ## 验证
 
 ```bash
-# 后端单元测试（28 项，纯内存不需要数据库；build.bat 也默认会跑）
+# 后端单元测试（37 项，纯内存不需要数据库；build.bat 也默认会跑）
 cd backend && mvn -B test
+
+# 下单幂等的真并发验证（22 项断言：同/异 requestId 并发、重试、畸形请求体）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/idempotency-verify.ps1
 
 # 商品域端到端（36 项断言）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1

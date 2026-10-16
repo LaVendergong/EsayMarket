@@ -15,6 +15,9 @@ public class Order extends BaseEntity {
 
     private String orderNo;
 
+    /** 下单幂等键：由客户端在一次结算里固定不变地传入，(user_id, request_id) 上有唯一键 */
+    private String requestId;
+
     private Long userId;
 
     private BigDecimal totalAmount;

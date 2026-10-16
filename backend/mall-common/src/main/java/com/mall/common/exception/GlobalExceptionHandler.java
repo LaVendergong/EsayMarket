@@ -5,6 +5,7 @@ import com.mall.common.result.ResultCode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.BindException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
@@ -40,6 +41,16 @@ public class GlobalExceptionHandler {
     public R<Void> handleMissingParam(Exception e) {
         log.warn("参数异常: {}", e.getMessage());
         return R.fail(ResultCode.VALIDATE_FAILED.getCode(), e.getMessage());
+    }
+
+    /**
+     * 请求体读不出来（畸形 JSON、类型对不上等）：这是**客户端的错**，必须按 400 返回。
+     * 之前落到下面的 Exception 兜底里变成 500，会把客户端错误算进服务端错误率、误导告警。
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public R<Void> handleNotReadable(HttpMessageNotReadableException e) {
+        log.warn("请求体无法解析: {}", e.getMessage());
+        return R.fail(ResultCode.VALIDATE_FAILED.getCode(), "请求体格式不正确");
     }
 
     @ExceptionHandler(NoResourceFoundException.class)

@@ -243,6 +243,71 @@ class OrderServiceImplTest {
         verify(productMapper, never()).incrementSales(anyLong(), anyInt());
     }
 
+    // ============================================================ create 幂等
+    @Test
+    void create_withAlreadyUsedRequestId_returnsThatOrderAndTouchesNothingElse() {
+        Order existing = order(88L, OrderStatus.UNPAID.getCode(), LocalDateTime.now().plusMinutes(10));
+        existing.setRequestId("req-1");
+        // 上一次已经把购物车选中项清掉了，所以这次读出来是空的
+        when(cartMapper.selectList(any())).thenReturn(List.of());
+        when(orderMapper.selectOne(any())).thenReturn(existing);
+
+        CreateOrderDTO dto = dtoWithAddress(9L);
+        dto.setRequestId("req-1");
+
+        OrderCreateVO vo = service.create(1L, dto);
+
+        assertThat(vo.getOrderId()).isEqualTo(88L);
+        assertThat(vo.getOrderNo()).isEqualTo("NO88");
+        assertThat(vo.getPayAmount()).isEqualByComparingTo("100.00");
+        verify(orderMapper, never()).insert(any(Order.class));
+        verify(skuMapper, never()).lockStock(anyLong(), anyInt());
+        verify(cartMapper, never()).deleteChecked(anyLong());
+    }
+
+    @Test
+    void create_withRequestId_storesTheTrimmedKeyOnTheOrderRow() {
+        when(cartMapper.selectList(any())).thenReturn(List.of(cart(1L, 10L, 100L, 1)));
+        when(addressService.getOwned(1L, 9L)).thenReturn(address());
+        when(productMapper.selectById(10L)).thenReturn(product(10L, 1));
+        when(skuMapper.selectById(100L)).thenReturn(sku(100L, 10L, "30.00", 5));
+        when(skuMapper.lockStock(anyLong(), anyInt())).thenReturn(1);
+        when(orderMapper.insert(any(Order.class))).thenAnswer(invocation -> {
+            invocation.getArgument(0, Order.class).setId(1L);
+            return 1;
+        });
+
+        CreateOrderDTO dto = dtoWithAddress(9L);
+        dto.setRequestId("   req-2   ");
+        service.create(1L, dto);
+
+        ArgumentCaptor<Order> captor = ArgumentCaptor.forClass(Order.class);
+        verify(orderMapper).insert(captor.capture());
+        assertThat(captor.getValue().getRequestId()).isEqualTo("req-2");
+    }
+
+    @Test
+    void create_withTooLongRequestId_isRejectedBeforeTakingAnyLock() {
+        CreateOrderDTO dto = dtoWithAddress(9L);
+        dto.setRequestId("x".repeat(65));
+
+        BusinessException e = catchThrowableOfType(() -> service.create(1L, dto), BusinessException.class);
+
+        assertThat(codeOf(e)).isEqualTo(ResultCode.VALIDATE_FAILED.getCode());
+        verify(cartMapper, never()).selectList(any());
+        verify(orderMapper, never()).insert(any(Order.class));
+    }
+
+    @Test
+    void create_withoutRequestId_skipsTheIdempotencyLookup() {
+        when(cartMapper.selectList(any())).thenReturn(List.of());
+
+        BusinessException e = catchThrowableOfType(() -> service.create(1L, null), BusinessException.class);
+
+        assertThat(codeOf(e)).isEqualTo(ResultCode.CART_EMPTY.getCode());
+        verify(orderMapper, never()).selectOne(any());
+    }
+
     // ================================================================== pay
     @Test
     void pay_expiredOrder_isRejectedBeforeAnyStockChange() {

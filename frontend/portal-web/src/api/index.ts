@@ -62,8 +62,12 @@ export const addressApi = {
 }
 
 export const orderApi = {
-  /** 结算购物车里「已选中」的条目；addressId 不传用默认地址 */
-  create: (addressId?: number) => http.post<never, OrderCreateVO>('/portal/order', { addressId }),
+  /**
+   * 结算购物车里「已选中」的条目；addressId 不传用默认地址。
+   * requestId 是幂等键：同一次结算里保持不变地传同一个值，重复提交只会落一单并返回原单。
+   */
+  create: (addressId?: number, requestId?: string) =>
+    http.post<never, OrderCreateVO>('/portal/order', { addressId, requestId }),
   page: (params: { pageNum: number; pageSize: number; status?: number }) =>
     http.get<never, PageResult<OrderVO>>('/portal/order/page', { params }),
   detail: (id: number) => http.get<never, OrderVO>(`/portal/order/${id}`),
