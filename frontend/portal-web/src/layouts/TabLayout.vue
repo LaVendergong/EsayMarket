@@ -2,6 +2,7 @@
 import { computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { cart } from '@/stores/cart'
+import AppErrorBoundary from '@/components/AppErrorBoundary.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,7 +27,11 @@ function go(name: string) {
 
 <template>
   <div class="app-shell">
-    <router-view :key="route.fullPath" />
+    <!-- 内容区单独套一层错误边界：某个页面抛异常时**保住底部 Tabbar**，用户还能切走
+         （只靠根 App.vue 那层的话整页会被顶掉，除了刷新无处可去） -->
+    <AppErrorBoundary>
+      <router-view :key="route.fullPath" />
+    </AppErrorBoundary>
     <van-tabbar :model-value="active" @change="go">
       <van-tabbar-item name="home" icon="wap-home-o">首页</van-tabbar-item>
       <van-tabbar-item name="cart" icon="shopping-cart-o" :badge="badge">购物车</van-tabbar-item>

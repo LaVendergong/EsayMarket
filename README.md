@@ -115,7 +115,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1
 # 购物车 + 订单端到端（61 项断言，含并发防超卖与超时关单）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p3-verify.ps1
 
-# 前端页面渲染检查（15 项断言 + 控制台告警零容忍；需要 Chrome + 前后端都已启动）
+# 前端页面渲染检查（24 项断言 + 控制台告警零容忍；需要 Chrome + 前后端都已启动）
 node scripts/web-check.mjs
 
 # 前端全流程交互测试（35 项断言：真点按钮跑完整个购物闭环，含「立即购买」）
@@ -155,7 +155,7 @@ prod 下的行为差异：
 > 这个自检是必需的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把解析不了的占位符
 > **原样保留而不是报错**，只靠 YAML 写 `${MALL_JWT_SECRET}` 拦不住（详见 `docs/AI-HANDOFF.md` §8 第 26 条）。
 
-CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V4、两个前端 typecheck+build。
+CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V5、两个前端 typecheck+build。
 
 ## 几个必须知道的坑
 
@@ -164,5 +164,10 @@ CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按
 3. **不要 `taskkill /IM java.exe`**：IDEA 自己的进程也是 java.exe，会误杀。要停用 `stop.bat`（按 PID / 命令行匹配）。
 4. **pnpm 11 会拦截依赖的安装脚本**，`allowBuilds: esbuild: true` 只能写在 `pnpm-workspace.yaml`（写 package.json 里会被静默忽略），否则 `pnpm install` 报 `ERR_PNPM_IGNORED_BUILDS`。
 5. **端口 8080 被占用**：`mall-portal` 因此用了 **8090**，别改回去。
+6. **两个前端的 UI 组件是按需注册的**：新页面用到**新**组件时，要去 `src/main.ts` 的清单里补一行，
+   否则组件不会注册（症状是页面少一块 + 控制台一条 `Failed to resolve component`）。
+   `node scripts/web-check.mjs` 的告警零容忍会抓住这类漏注册。
+7. **前端有分层错误兜底**：根 `App.vue` 一层 + 布局内容区一层（侧边栏/Tabbar 不会被顶掉）。
+   页面内主动发的请求要自己 `try/catch`，别把「订单不存在」这类业务结果抛给错误边界——那会把整页换成「页面出错了」。
 
 更多（含 18+ 条踩坑与全部验证基线）见 `docs/AI-HANDOFF.md`。

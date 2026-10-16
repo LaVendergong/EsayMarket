@@ -1,5 +1,23 @@
-import { createRouter, createWebHashHistory } from 'vue-router'
+import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 import { auth } from '@/stores/auth'
+
+/**
+ * 只在 dev 构建里注册的「故意抛错」页面，用来让错误边界可被自动化验证
+ * （`scripts\web-check.mjs` 会访问它并断言出现兜底 UI 而不是白屏）。
+ * `import.meta.env.DEV` 在生产构建里是常量 false，这一整个分支会被当死代码删掉。
+ */
+const devOnlyRoutes: RouteRecordRaw[] = import.meta.env.DEV
+  ? [
+      {
+        // 挂在 Tabbar 布局的 children 下（不是顶层）：错误发生在「内容区」，
+        // 正好验证布局那层错误边界能保住底部 Tabbar
+        path: '__error-demo',
+        name: 'errorDemo',
+        component: () => import('@/views/ErrorDemoView.vue'),
+        meta: { title: '错误兜底演示' }
+      }
+    ]
+  : []
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -38,7 +56,8 @@ const router = createRouter({
           name: 'mine',
           component: () => import('@/views/MineView.vue'),
           meta: { title: '我的' }
-        }
+        },
+        ...devOnlyRoutes
       ]
     },
     {

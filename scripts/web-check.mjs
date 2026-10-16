@@ -85,6 +85,14 @@ if (adminVo) {
   expect('管理后台 · 分类管理', await innerText(), ['分类管理', '数码', '笔记本'])
   await goto(`${ADMIN_WEB}/?r=4#/order`, 3000)
   expect('管理后台 · 订单管理', await innerText(), ['订单管理', '订单号'])
+  // 表单类页面以前没被覆盖，而「组件漏注册」正是最容易藏在这种页面里（见 docs §8 第 20 条）
+  await goto(`${ADMIN_WEB}/?r=5#/product/new`, 3500)
+  expect('管理后台 · 商品新增页', await innerText(), ['新增商品', '商品名称'])
+  await goto(`${ADMIN_WEB}/?r=6#/product/1/edit`, 3500)
+  expect('管理后台 · 商品编辑页', await innerText(), ['编辑商品', '商品名称'])
+  // 不存在的订单：页面要自己显示业务空状态，**不能**把异常抛给错误边界（那会把整页换成兜底 UI）
+  await goto(`${ADMIN_WEB}/?r=7#/order/999999`, 3000)
+  expect('管理后台 · 订单不存在时显示业务空状态', await innerText(), ['订单详情', '订单不存在'])
 } else {
   record('管理后台（缺 token，跳过）', false, 'admin login failed')
 }
@@ -98,6 +106,8 @@ await goto(`${PORTAL_WEB}/#/product/999999`, 3000)
 expect('H5 · 商品不存在走兜底', await innerText(), ['商品不存在或已下架'])
 await goto(`${PORTAL_WEB}/#/login`, 3000)
 expect('H5 · 登录页', await innerText(), ['登录', '用户名'])
+await goto(`${PORTAL_WEB}/#/register`, 3000)
+expect('H5 · 注册页', await innerText(), ['注册'])
 
 // 3) H5 登录后（购物车 / 结算 / 订单 / 地址 / 我的）
 if (buyerVo) {
@@ -113,6 +123,10 @@ if (buyerVo) {
   expect('H5 · 收货地址', await innerText(), ['收货地址', '新增地址'])
   await goto(`${PORTAL_WEB}/?r=9#/mine`, 3000)
   expect('H5 · 我的', await innerText(), ['我的订单', '收货地址', '退出登录'])
+  await goto(`${PORTAL_WEB}/?r=10#/address/new`, 3000)
+  expect('H5 · 新增地址页', await innerText(), ['新增地址', '保存'])
+  await goto(`${PORTAL_WEB}/?r=11#/order/999999`, 3000)
+  expect('H5 · 订单不存在时显示业务空状态', await innerText(), ['订单详情', '订单不存在'])
 } else {
   record('H5 登录后页面（缺 token，跳过）', false, 'portal login failed')
 }
@@ -126,7 +140,42 @@ const swapped = await waitFor(
 )
 record('H5 · 同路由换参数会重新加载', swapped, `换到不存在的商品后不再显示旧商品=${swapped}`)
 
-// 5) 控制台告警 / 错误（Vue 未解析组件、运行时异常都会落在这里）
+// 5) 错误兜底：/__error-demo 是 dev-only 的「故意抛错」页（见各自 src/views/ErrorDemoView.vue），
+//    用它证明「页面抛异常时用户看到的是兜底 UI 而不是白屏」。
+//    这一段**会故意**产生 console.error，所以单独计数，验完从总账里摘掉，免得下面的零容忍断言误报。
+log('')
+log('--- 错误兜底（故意抛错的演示页）---')
+const errBaseline = problems.length
+
+await goto(`${ADMIN_WEB}/?r=err#/__error-demo`, 3500)
+const adminBoundary = await innerText()
+record(
+  '管理后台 · 页面抛异常时显示兜底 UI 且保住侧边栏',
+  adminBoundary.includes('页面出错了') &&
+    adminBoundary.includes('__error_demo__') &&
+    adminBoundary.includes('刷新页面') &&
+    adminBoundary.includes('商品管理'),
+  `len=${adminBoundary.length}`
+)
+
+await goto(`${PORTAL_WEB}/#/__error-demo`, 3500)
+const h5Boundary = await innerText()
+record(
+  'H5 · 页面抛异常时显示兜底 UI 且保住 Tabbar',
+  h5Boundary.includes('__error_demo__') && h5Boundary.includes('刷新页面') && h5Boundary.includes('首页'),
+  `len=${h5Boundary.length}`
+)
+
+const boundaryProblems = problems.slice(errBaseline)
+record(
+  '错误兜底：每个演示页恰好上报 1 次（边界返回 false -> 不会重复上报）',
+  boundaryProblems.length === 2,
+  `count=${boundaryProblems.length} :: ${boundaryProblems.map((p) => p.slice(0, 70)).join(' | ')}`
+)
+// 这两条是预期内的，从总账摘掉
+problems.splice(errBaseline)
+
+// 6) 控制台告警 / 错误（Vue 未解析组件、运行时异常都会落在这里）
 log('')
 const uniq = [...new Set(problems)]
 log(`--- 捕获到的控制台告警/错误：${uniq.length} 条 ---`)

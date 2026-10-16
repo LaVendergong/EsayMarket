@@ -11,11 +11,21 @@ const router = useRouter()
 
 const order = ref<OrderVO | null>(null)
 const submitting = ref(false)
+/** 加载失败（最常见的是 3001 订单不存在）。拦截器已经弹过提示，页面只需显示一个可读的空状态 */
+const loadFailed = ref(false)
 
 async function load() {
   const raw = route.params.id
   const id = Number(Array.isArray(raw) ? raw[0] : raw)
-  order.value = await orderApi.detail(id)
+  try {
+    order.value = await orderApi.detail(id)
+    loadFailed.value = false
+  } catch {
+    // ⚠️ 别把这个异常放出去：onMounted 的回调被 Vue 用 callWithAsyncErrorHandling 包过，
+    // reject 会一路冒到全局错误边界，把整页换成「页面出错了」——
+    // 而「订单不存在」是正常业务结果，应该在页面里显示空状态
+    loadFailed.value = true
+  }
 }
 
 async function pay() {
@@ -60,6 +70,8 @@ onMounted(load)
 <template>
   <div class="app-shell" :class="{ 'pb-submit': order && (order.status === 0 || order.status === 2) }">
     <van-nav-bar title="订单详情" left-arrow @click-left="router.back()" />
+
+    <van-empty v-if="!order" :description="loadFailed ? '订单不存在或已被删除' : '加载中…'" />
 
     <template v-if="order">
       <van-cell-group inset class="block status-block">

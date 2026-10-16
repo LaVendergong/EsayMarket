@@ -11,6 +11,8 @@ const router = useRouter()
 
 const order = ref<OrderVO | null>(null)
 const loading = ref(false)
+/** 加载失败（最常见的是 3001 订单不存在），用于展示可读的空状态而不是让页面空着 */
+const loadFailed = ref(false)
 
 function statusTag(status: number) {
   return ORDER_STATUS.find((s) => s.value === status)?.tag ?? 'info'
@@ -22,6 +24,10 @@ onMounted(async () => {
   loading.value = true
   try {
     order.value = await orderApi.detail(id)
+    loadFailed.value = false
+  } catch {
+    // 同 portal-web 的订单详情：业务失败要在页面里兜住，别让它冒到错误边界把整页换成兜底 UI
+    loadFailed.value = true
   } finally {
     loading.value = false
   }
@@ -33,6 +39,8 @@ onMounted(async () => {
     <div class="toolbar">
       <el-button :icon="ArrowLeft" @click="router.push('/order')">返回订单列表</el-button>
     </div>
+
+    <el-empty v-if="!order && !loading" :description="loadFailed ? '订单不存在或已被删除' : '暂无数据'" />
 
     <template v-if="order">
       <el-card shadow="never">

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Files, Goods, Tickets } from '@element-plus/icons-vue'
 import { auth } from '@/stores/auth'
+import AppErrorBoundary from '@/components/AppErrorBoundary.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -70,7 +71,12 @@ async function onCommand(cmd: string) {
       </el-header>
 
       <el-main class="main">
-        <router-view :key="route.fullPath" />
+        <!-- 内容区单独套一层错误边界：某个页面抛异常时**保住侧边栏**，用户还能点别的菜单走人。
+             （只有根 App.vue 那一层的话，整页会被兜底 UI 顶掉，用户除了刷新无处可去）
+             页面自己没处理的异常会被这层接住；这层自身/布局出错才轮到根那层。 -->
+        <AppErrorBoundary>
+          <router-view :key="route.fullPath" />
+        </AppErrorBoundary>
       </el-main>
     </el-container>
   </el-container>

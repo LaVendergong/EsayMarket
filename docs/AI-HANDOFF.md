@@ -161,6 +161,9 @@ pnpm typecheck    # vue-tsc 类型检查（vite build 本身不做类型检查�
 - 后台账号 `malladmin / admin123456`（登录页已预填）；H5 没有预置账号，**先注册**即可。
 - 登录态放 localStorage（admin 用 `mall_admin_token`，H5 用 `mall_portal_token`），都是 hash 路由。
 - 两个 dev server 都只监听本机；生产部署 `pnpm build` 产物丢任意静态服务器即可（hash 路由，不用配 rewrite）。
+- **UI 库是按需注册的**：两个 `src/main.ts` 里各有一份显式组件清单。新页面用到**新**组件时必须往清单里补一行，
+  否则组件不注册（症状是页面少一块 + 控制台一条 `Failed to resolve component`）。`node scripts\web-check.mjs`
+  的告警零容忍会抓住这类漏注册。
 
 ### 4.2 构建、单元测试与 CI
 
@@ -559,7 +562,65 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 **解决：删掉。** 没用到的依赖 = 多一份升级负担与攻击面，将来真要做缓存再带着目的加回来。
 （本来考虑用 Redis 做超时关单的分布式锁，但订单状态的条件 UPDATE 已经保证了幂等，MySQL 也已经是硬依赖，
 没必要为此引入一个中间件。）
-| 前端全局错误兜底 + UI 库按需引入 | ⬜ | 待做 |
+
+### P2 前端错误兜底与包体（24/24）
+
+**问题 1：两个前端都没有全局错误兜底。** 组件渲染抛异常时用户看到的是**整页白屏**，控制台只有一条 stack，
+而 `pnpm build` / `vue-tsc` 完全发现不了。
+
+**解决（分层兜底）**：
+
+- `src/utils/errorHandler.ts`：`app.config.errorHandler`（Vue 组件树）+ `unhandledrejection`（忘了 catch 的 Promise）
+  + `window.onerror`（只报 `e.error` 非空的，避免把资源加载失败/ResizeObserver 噪声当应用异常）。
+  一律 `console.error`，并按错误去重（5s 内同一条只提示一次，避免渲染循环刷屏）。
+- `src/components/AppErrorBoundary.vue`：`onErrorCaptured` 实现的错误边界，兜底 UI 带「刷新页面」按钮。
+  返回 `false` 表示已处理 → Vue 不会再调 `errorHandler`，所以**一条错误只上报一次**。
+  切路由时自动复位（否则出错后点导航也进不去新页面）。
+- **放两层**：根 `App.vue` 一层（最后的安全网）+ **布局内容区**一层
+  （`AdminLayout.vue` / `TabLayout.vue` 的 `router-view`）。
+  只放根那一层的话，页面一抛异常**侧边栏/Tabbar 也会被兜底 UI 顶掉**，用户除了刷新无处可去；
+  内容区那层接住页面异常后，用户还能点别的菜单切走。
+
+**验证**（`web-check.mjs`，24/24，见 `tmp\web\cdp-report.txt`）：用 dev-only 的「故意抛错」页
+`src/views/ErrorDemoView.vue`（路由挂在**布局的 children 下**，被 `import.meta.env.DEV` 包着，
+生产构建整块 DCE，实测连 chunk 都不产出）：
+
+```
+[PASS] 管理后台 · 页面抛异常时显示兜底 UI 且保住侧边栏 :: len=84
+[PASS] H5 · 页面抛异常时显示兜底 UI 且保住 Tabbar :: len=29
+[PASS] 错误兜底：每个演示页恰好上报 1 次（边界返回 false -> 不会重复上报） :: count=2
+```
+
+> 这套检查顺带抓出两个真 bug（见 §8 第 33 条）：两个订单详情页把 `onMounted` 里异步 `load()` 的 reject
+> 放了出去，于是「订单不存在」这种**正常业务结果**会被错误边界接住、整页变成「页面出错了」。
+> 现在两个页面都自己 catch 并显示业务空状态，断言改成 `订单不存在时显示业务空状态`。
+
+**问题 2：主包过大。** admin-web 入口 chunk **1,037 kB**（Element Plus 全量 `app.use`），H5 **321 kB**（Vant 全量）。
+
+**解决：按需注册。** 两个入口不再 `app.use(整个库)`，改成显式列出用到的组件逐个 `app.use(组件)`
+（每个组件的 install 会连带注册子组件，但**指令不算**——`v-loading` 得单独 `app.use(ElLoading)`）。
+清单是扫模板 `<el-*>` / `<van-*>` 得到的，并核对过这些名字确实是两个库的导出。
+Element Plus 的中文语言包改由根组件 `<el-config-provider :locale="zhCn">` 提供（以前是 `app.use(ElementPlus, {locale})` 给的）。
+
+| | 入口 chunk | JS 合计 |
+|---|---|---|
+| admin-web 改前 | 1,037 kB | 1.44 MB |
+| admin-web 改后 | **354 kB** | **0.64 MB** |
+| portal-web 改前 | 321 kB | 0.59 MB |
+| portal-web 改后 | **最 189 kB → 101 kB(vendor-vue)/84 kB(vendor-vant)** | **0.27 MB** |
+
+⚠️ **CSS 仍用整份**（`element-plus/dist/index.css` / `vant/lib/index.css`）：按组件拆 CSS 要手工维护、
+漏一个就是「页面能跑但外观崩」，而 CSS 是独立文件、gzip 后只有几十 kB，不值得为此冒险。
+这次要解决的是 JS 主包。
+
+⚠️ **维护提醒**：以后新写页面用到**新**组件，必须去 `main.ts` 的清单里补一行，否则组件不会注册
+（症状是页面少一块、控制台一条 `Failed to resolve component` 告警——正好会被 `web-check` 的零容忍抓住）。
+
+**vendor 分包**：`vite.config.ts` 里用**函数式** `manualChunks` 把第三方库与业务代码分开（发版后用户只需
+重新下载业务代码那个文件）。⚠️ 不能用 `{ 'vendor-element-plus': ['element-plus'] }` 的对象式写法，
+实测会让 element-plus 从 ~396 kB 反弹到 799 kB（见 §8 第 32 条）；所以 admin-web 对 element-plus
+**刻意返回 undefined**（让它随主流），只拆 vue 与其它依赖。
+| 前端全局错误兜底 + UI 库按需引入 | ✅ | 见下方「P2 前端错误兜底与包体」；`web-check` 24/24 |
 | 生产加固（CORS 白名单 / 登录限流 / traceId / 接口版本） | ⬜ | 待做 |
 
 ### P1 下单幂等（22/22）
@@ -715,6 +776,21 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 31. **会被自动化脚本解析的日志行要刻意保持稳定**：`OrderTimeoutTask` 的
     `[timeout-job] closed N expired unpaid order(s)` 是 `timeout-job-verify.ps1` 用来断言
     「同一单只关一次」的依据，所以这一行**保持 ASCII、不轻易改前缀与措辞**（同文件其它日志行仍是中文，不受影响）。
+32. **Rollup `manualChunks` 的对象式写法会毁掉 tree-shaking**：`{ 'vendor-element-plus': ['element-plus'] }`
+    会把整包的入口模块当成 chunk 入口，入口的导出不会被摇掉——实测 element-plus 从 ~396 kB **反弹到 799 kB**
+    （JS 合计 0.63 → 1.10 MB，反而更差）。必须用**函数式**（按 `id.includes(...)` 判断）。
+    并且对 element-plus 这种库即使函数式也膨胀，所以 admin-web 干脆让函数对它返回 `undefined`，只拆 vue 与其它依赖。
+33. **`onMounted(async () => ...)` 里的 reject 会冒到错误边界**：Vue 用 `callWithAsyncErrorHandling` 包装生命周期钩子，
+    会对它返回的 Promise 挂 `.catch` → `handleError` → 一路找到 `onErrorCaptured`。
+    后果是**「订单不存在」这种正常业务结果，只要页面没自己 catch，整页就会变成「页面出错了」**（实测踩过：
+    两个订单详情页）。规矩：**页面自己发起的请求要自己 try/catch**，把失败渲染成业务空状态；
+    错误边界只兜「意料之外」的异常。
+34. **模板里不能直接写全局对象**：`@click="() => location.reload()"` 会被 `vue-tsc` 报
+    `TS2339: Property 'location' does not exist on type 'CreateComponentPublicInstance<...>'`
+    ——模板表达式的属性是往**组件实例**上找的。在 `<script setup>` 里包一个 `reload()` 函数即可。
+35. **错误边界只放在根组件会把导航一起顶掉**：用户除了点「刷新」无处可去。
+    正确做法是**布局内容区再放一层**（`AdminLayout` / `TabLayout` 的 `router-view`）：
+    页面异常由内层接住、外壳（侧边栏/Tabbar）保留；布局自身出错才轮到根那层。
 
 ---
 
