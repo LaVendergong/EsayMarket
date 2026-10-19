@@ -99,18 +99,18 @@ mkdirSync(OUT_DIR, { recursive: true })
 
 purge('开跑前清掉上次残留')
 
-const adminLogin = await api('POST', `${ADMIN_API}/api/admin/auth/login`, {
+const adminLogin = await api('POST', `${ADMIN_API}/api/v1/admin/auth/login`, {
   body: { username: 'malladmin', password: 'admin123456' }
 })
 const adminToken = adminLogin.data?.token
 check('准备：管理员登录', adminLogin.code === 200, `code=${adminLogin.code} role=${adminLogin.data?.role}`)
 
-const catR = await api('POST', `${ADMIN_API}/api/admin/category`, {
+const catR = await api('POST', `${ADMIN_API}/api/v1/admin/category`, {
   body: { parentId: 0, name: CAT, sort: 93 },
   token: adminToken
 })
 const catId = catR.data
-const prodR = await api('POST', `${ADMIN_API}/api/admin/product`, {
+const prodR = await api('POST', `${ADMIN_API}/api/v1/admin/product`, {
   body: {
     categoryId: catId,
     name: ITEM,
@@ -252,6 +252,12 @@ try {
   // ================================================================ H5：提交订单
   log('')
   log('--- H5：下单 → 支付 ---')
+  // 结算页 load() 是先取地址、再取购物车清单：地址卡片先出现时清单可能还没到，
+  // 这时候点「提交订单」会因为 items 为空而什么都不做（只弹一个 toast）。
+  // 所以必须等清单真的渲染出来再点。
+  const itemsReady = await waitText(ITEM, 8000)
+  check('结算页商品清单已加载', itemsReady, `含商品=${itemsReady}`)
+
   await clickText('.van-submit-bar__button', '提交订单')
   const onOrder = await waitFor(onRoute('order/'), 10000)
   const orderReady = await waitText('待支付')
@@ -322,7 +328,7 @@ try {
   // ================================================================ H5：立即购买（直连下单，不碰购物车）
   log('')
   log('--- H5：立即购买（不破坏购物车勾选） ---')
-  const apiToken = (await api('POST', `${PORTAL_API}/api/portal/auth/login`, {
+  const apiToken = (await api('POST', `${PORTAL_API}/api/v1/portal/auth/login`, {
     body: { username: BUYER, password: BUYER_PWD }
   })).data?.token
   // 本脚本前面一直按 product_id 定位，这里要用 sku_id 直接加购/直连下单，所以补一次查询
@@ -331,14 +337,14 @@ try {
 
   // 先在购物车放一件并【取消勾选】：老实现是「先加购再把其它条目取消勾选」绕出来的，
   // 只有让购物车处于「有货但未勾选」的状态，才能验出新老行为的差异
-  const addResp = await api('POST', `${PORTAL_API}/api/portal/cart`, {
+  const addResp = await api('POST', `${PORTAL_API}/api/v1/portal/cart`, {
     body: { skuId, quantity: 1 },
     token: apiToken
   })
-  const cartBefore = (await api('GET', `${PORTAL_API}/api/portal/cart`, { token: apiToken })).data
+  const cartBefore = (await api('GET', `${PORTAL_API}/api/v1/portal/cart`, { token: apiToken })).data
   check('预备：购物车里放进 1 件', addResp.code === 200 && cartBefore.length === 1, `addCode=${addResp.code} size=${cartBefore.length}`)
-  await api('PUT', `${PORTAL_API}/api/portal/cart/${cartBefore[0].id}/checked?checked=0`, { token: apiToken })
-  const cartPre = (await api('GET', `${PORTAL_API}/api/portal/cart`, { token: apiToken })).data
+  await api('PUT', `${PORTAL_API}/api/v1/portal/cart/${cartBefore[0].id}/checked?checked=0`, { token: apiToken })
+  const cartPre = (await api('GET', `${PORTAL_API}/api/v1/portal/cart`, { token: apiToken })).data
   info(`购物车预备状态：size=${cartPre.length} checked=${cartPre[0]?.checked}（期望 1 / 0）`)
 
   await goto(`${PORTAL_WEB}/#/product/${prodId}`, 3500)
@@ -367,7 +373,7 @@ try {
   check('立即购买订单带幂等键 requestId', !!directReqId, `request_id=${directReqId ? 'set' : '(空)'}`)
 
   // 核心：直连下单必须完全没有动购物车
-  const cartAfter = (await api('GET', `${PORTAL_API}/api/portal/cart`, { token: apiToken })).data
+  const cartAfter = (await api('GET', `${PORTAL_API}/api/v1/portal/cart`, { token: apiToken })).data
   check(
     '立即购买没有破坏购物车原有的勾选',
     cartAfter.length === 1 && cartAfter[0].checked === 0 && cartAfter[0].skuId === skuId,
@@ -377,7 +383,7 @@ try {
   // ================================================================ 收尾核对
   log('')
   log('--- 收尾核对 ---')
-  const finalOrder = await api('GET', `${PORTAL_API}/api/portal/order/${orderId}`, { token: (await api('POST', `${PORTAL_API}/api/portal/auth/login`, { body: { username: BUYER, password: BUYER_PWD } })).data?.token })
+  const finalOrder = await api('GET', `${PORTAL_API}/api/v1/portal/order/${orderId}`, { token: (await api('POST', `${PORTAL_API}/api/v1/portal/auth/login`, { body: { username: BUYER, password: BUYER_PWD } })).data?.token })
   check(
     '订单最终状态与收货快照正确',
     finalOrder.code === 200 && finalOrder.data.status === 3 && finalOrder.data.statusText === '已完成' && finalOrder.data.items.length === 1 && finalOrder.data.receiver === '流程测试收货人',

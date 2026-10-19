@@ -46,12 +46,23 @@ const addressId = ref<number | undefined>(undefined)
 const items = ref<CartVO[]>([])
 const pickerVisible = ref(false)
 const submitting = ref(false)
+/** 页面数据（地址 + 清单）加载中：这期间不让点提交 */
+const loading = ref(true)
 
 const selected = computed(() => addresses.value.find((a) => a.id === addressId.value))
 const total = computed(() => items.value.reduce((s, c) => s + Number(c.totalPrice || 0), 0))
 const fullAddress = (a: AddressVO) => [a.province, a.city, a.district, a.detail].filter(Boolean).join('')
 
 async function load() {
+  loading.value = true
+  try {
+    await loadData()
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadData() {
   const addrList = await addressApi.list()
   addresses.value = addrList
   addressId.value = (addrList.find((a) => a.isDefault === 1) ?? addrList[0])?.id
@@ -157,7 +168,15 @@ onMounted(load)
       <van-cell title="应付金额" :value="money(total)" class="payable" />
     </van-cell-group>
 
-    <van-submit-bar :price="Math.round(total * 100)" button-text="提交订单" :loading="submitting" @submit="submit" />
+    <!-- loading 期间禁用：清单还没到就点提交，submit() 只会弹「没有待结算的商品」，
+         白让用户以为下单失败（这个状态在慢网络下真的会出现） -->
+    <van-submit-bar
+      :price="Math.round(total * 100)"
+      button-text="提交订单"
+      :loading="submitting"
+      :disabled="loading"
+      @submit="submit"
+    />
 
     <van-popup v-model:show="pickerVisible" position="bottom" round>
       <div class="pick-head">选择收货地址</div>

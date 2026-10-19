@@ -22,7 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Tag(name = "后台-商品")
 @RestController
-@RequestMapping("/api/admin/product")
+@RequestMapping("/api/v1/admin/product")
 @RequiredArgsConstructor
 public class ProductController {
 

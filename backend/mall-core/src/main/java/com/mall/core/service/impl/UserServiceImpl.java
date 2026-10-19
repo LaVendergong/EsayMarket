@@ -13,6 +13,7 @@ import com.mall.core.model.dto.RegisterDTO;
 import com.mall.core.model.vo.LoginVO;
 import com.mall.core.model.vo.UserVO;
 import com.mall.core.security.JwtProperties;
+import com.mall.core.security.LoginThrottle;
 import com.mall.core.service.UserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -30,6 +31,7 @@ public class UserServiceImpl implements UserService {
     private final UserMapper userMapper;
     private final PasswordEncoder passwordEncoder;
     private final JwtProperties jwtProperties;
+    private final LoginThrottle loginThrottle;
 
     @Override
     public Long register(RegisterDTO dto) {
@@ -50,16 +52,24 @@ public class UserServiceImpl implements UserService {
 
     @Override
     public LoginVO login(LoginDTO dto) {
+        // 先看有没有被限流：已超限就别查库、别校验密码了（否则 BCrypt 反而成了压测入口）
+        loginThrottle.checkAllowed(dto.getUsername());
+
         User user = userMapper.selectOne(Wrappers.<User>lambdaQuery().eq(User::getUsername, dto.getUsername()));
         if (user == null) {
+            // 用户名不存在也计入失败：错误信息的差异会变成枚举用户名的探针
+            loginThrottle.recordFailure(dto.getUsername());
             throw new BusinessException(ResultCode.PASSWORD_ERROR);
         }
         if (!passwordEncoder.matches(dto.getPassword(), user.getPassword())) {
+            loginThrottle.recordFailure(dto.getUsername());
             throw new BusinessException(ResultCode.PASSWORD_ERROR);
         }
         if (user.getStatus() != null && user.getStatus() == 0) {
             throw new BusinessException(ResultCode.ACCOUNT_DISABLED);
         }
+        // 密码正确才清计数（禁用账号不清，避免被拿来刷掉别人的锁定状态）
+        loginThrottle.reset(dto.getUsername());
         Map<String, Object> claims = new HashMap<>();
         claims.put("role", user.getRole() == null ? 0 : user.getRole());
         claims.put("username", user.getUsername());

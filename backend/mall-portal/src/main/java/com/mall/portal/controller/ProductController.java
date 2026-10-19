@@ -18,7 +18,7 @@ import java.math.BigDecimal;
 
 @Tag(name = "商品")
 @RestController
-@RequestMapping("/api/portal/product")
+@RequestMapping("/api/v1/portal/product")
 @RequiredArgsConstructor
 public class ProductController {
 

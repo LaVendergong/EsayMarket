@@ -13,7 +13,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Tag(name = "用户")
 @RestController
-@RequestMapping("/api/portal/user")
+@RequestMapping("/api/v1/portal/user")
 @RequiredArgsConstructor
 public class UserController {
 

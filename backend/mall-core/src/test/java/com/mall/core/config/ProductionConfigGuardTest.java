@@ -28,13 +28,37 @@ class ProductionConfigGuardTest {
     private static final String GOOD_PASSWORD = "a-real-db-password";
 
     private Environment env(boolean prod, String secret, String password) {
+        return env(prod, secret, password, null);
+    }
+
+    private Environment env(boolean prod, String secret, String password, String corsOrigins) {
         Map<String, String> props = new HashMap<>();
         props.put("mall.jwt.secret", secret);
         props.put("spring.datasource.password", password);
+        if (corsOrigins != null) {
+            props.put("mall.cors.allowed-origins", corsOrigins);
+        }
         Environment env = mock(Environment.class);
         when(env.acceptsProfiles(any(Profiles.class))).thenReturn(prod);
         when(env.getProperty(anyString())).thenAnswer(inv -> props.get(inv.getArgument(0, String.class)));
         return env;
+    }
+
+    @Test
+    void prod_withWildcardCorsOrigin_isRejected() {
+        // 开着 allowCredentials 再配通配来源 = 任意站点可带用户凭证调后端
+        Environment env = env(true, GOOD_SECRET, GOOD_PASSWORD, "https://mall.example.com,*");
+
+        assertThatThrownBy(() -> new ProductionConfigGuard(env).check())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mall.cors.allowed-origins");
+    }
+
+    @Test
+    void prod_withExplicitCorsOrigins_passes() {
+        Environment env = env(true, GOOD_SECRET, GOOD_PASSWORD, "https://mall.example.com,https://admin.example.com");
+
+        assertThatCode(() -> new ProductionConfigGuard(env).check()).doesNotThrowAnyException();
     }
 
     @Test

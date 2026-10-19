@@ -22,7 +22,7 @@ import java.util.List;
 
 @Tag(name = "收货地址")
 @RestController
-@RequestMapping("/api/portal/address")
+@RequestMapping("/api/v1/portal/address")
 @RequiredArgsConstructor
 public class AddressController {
 

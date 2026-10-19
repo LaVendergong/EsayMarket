@@ -22,7 +22,7 @@ import java.util.List;
 
 @Tag(name = "后台-商品分类")
 @RestController
-@RequestMapping("/api/admin/category")
+@RequestMapping("/api/v1/admin/category")
 @RequiredArgsConstructor
 public class CategoryController {
 

@@ -47,16 +47,16 @@ async function post(url, body) {
 mkdirSync(OUT_DIR, { recursive: true })
 
 // ------------------------------------------------------------------ 登录态
-const adminVo = (await post(`${ADMIN_API}/api/admin/auth/login`, { username: 'malladmin', password: 'admin123456' })).data
+const adminVo = (await post(`${ADMIN_API}/api/v1/admin/auth/login`, { username: 'malladmin', password: 'admin123456' })).data
 log(`[prep] mall-admin login: ${adminVo ? 'ok role=' + adminVo.role : 'FAILED'}`)
 
 // H5 用一个固定的测试账号（注册失败说明已存在，直接登录）
-await post(`${PORTAL_API}/api/portal/auth/register`, {
+await post(`${PORTAL_API}/api/v1/portal/auth/register`, {
   username: 'webcheck1',
   password: 'webcheck123456',
   nickname: 'Web Check'
 }).catch(() => {})
-const buyerVo = (await post(`${PORTAL_API}/api/portal/auth/login`, { username: 'webcheck1', password: 'webcheck123456' })).data
+const buyerVo = (await post(`${PORTAL_API}/api/v1/portal/auth/login`, { username: 'webcheck1', password: 'webcheck123456' })).data
 log(`[prep] portal buyer login: ${buyerVo ? 'ok' : 'FAILED'}`)
 
 // ------------------------------------------------------------------ 浏览器

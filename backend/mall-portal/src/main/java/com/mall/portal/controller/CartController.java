@@ -23,7 +23,7 @@ import java.util.List;
 
 @Tag(name = "购物车")
 @RestController
-@RequestMapping("/api/portal/cart")
+@RequestMapping("/api/v1/portal/cart")
 @RequiredArgsConstructor
 public class CartController {
 

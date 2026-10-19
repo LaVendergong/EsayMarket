@@ -20,6 +20,7 @@ public enum ResultCode {
     USER_NOT_FOUND(1002, "用户不存在"),
     PASSWORD_ERROR(1003, "用户名或密码错误"),
     ACCOUNT_DISABLED(1004, "账号已被禁用"),
+    LOGIN_TOO_MANY_ATTEMPTS(1005, "登录失败次数过多，请稍后再试"),
 
     PRODUCT_NOT_FOUND(2001, "商品不存在"),
     PRODUCT_OFF_SHELF(2002, "商品已下架"),

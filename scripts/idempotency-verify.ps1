@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # Order-idempotency verification.
 #
 # Why this exists: create() used to be "read checked cart rows -> lock stock ->
@@ -77,7 +77,7 @@ function Start-RaceOrder([string]$token, [string]$bodyJson) {
     $client = New-Object System.Net.Http.HttpClient
     $client.DefaultRequestHeaders.Add('Authorization', "Bearer $token")
     $content = New-Object System.Net.Http.StringContent($bodyJson, [System.Text.Encoding]::UTF8, 'application/json')
-    return [pscustomobject]@{ client = $client; task = $client.PostAsync("$portal/api/portal/order", $content) }
+    return [pscustomobject]@{ client = $client; task = $client.PostAsync("$portal/api/v1/portal/order", $content) }
 }
 function Complete-RaceOrder($race, [string]$tag) {
     $resp = $race.task.GetAwaiter().GetResult()
@@ -96,15 +96,15 @@ Write-Host '== setup =='
 Purge
 Write-Host '   leftovers purged'
 
-$adm = Http-Json -Method POST -Url "$admin/api/admin/auth/login" -Body @{ username = 'malladmin'; password = 'admin123456' } -Name '01-admin-login'
+$adm = Http-Json -Method POST -Url "$admin/api/v1/admin/auth/login" -Body @{ username = 'malladmin'; password = 'admin123456' } -Name '01-admin-login'
 # 注意：Payload 返回的是 body.data（整个 LoginVO 对象），这里要取 .token，别把对象当 token 用
 $adminToken = (Payload $adm).token
 Check 'setup: admin login' ((Code $adm) -eq 200 -and $null -ne $adminToken) "code=$(Code $adm)"
 
-$cat = Http-Json -Method POST -Url "$admin/api/admin/category" -Token $adminToken -Body @{ parentId = 0; name = $CAT; sort = 92 } -Name '02-cat'
+$cat = Http-Json -Method POST -Url "$admin/api/v1/admin/category" -Token $adminToken -Body @{ parentId = 0; name = $CAT; sort = 92 } -Name '02-cat'
 $catId = Payload $cat
 Check 'setup: category created' ($null -ne $catId -and [long]$catId -gt 0) "code=$(Code $cat) categoryId=$catId"
-$prod = Http-Json -Method POST -Url "$admin/api/admin/product" -Token $adminToken -Body @{
+$prod = Http-Json -Method POST -Url "$admin/api/v1/admin/product" -Token $adminToken -Body @{
     categoryId = $catId; name = $ITEM; subTitle = 'idempotency'; price = $PRICE
     skus = @( @{ skuCode = $SPEC; spec = $SPEC; price = $PRICE; stock = $STOCK } )
 } -Name '03-product'
@@ -112,14 +112,14 @@ $prodId = [long](Payload $prod)
 $skuId = [long](Sql "SELECT id FROM t_sku WHERE product_id = $prodId LIMIT 1;")
 Check 'setup: test product ready' ($prodId -gt 0 -and $skuId -gt 0) "productId=$prodId skuId=$skuId stock=$STOCK"
 
-Http-Json -Method POST -Url "$portal/api/portal/auth/register" -Body @{ username = $BUYER; password = $BUYER_PWD; nickname = 'Idem Buyer' } -Name '04-register' | Out-Null
-$login = Http-Json -Method POST -Url "$portal/api/portal/auth/login" -Body @{ username = $BUYER; password = $BUYER_PWD } -Name '05-login'
+Http-Json -Method POST -Url "$portal/api/v1/portal/auth/register" -Body @{ username = $BUYER; password = $BUYER_PWD; nickname = 'Idem Buyer' } -Name '04-register' | Out-Null
+$login = Http-Json -Method POST -Url "$portal/api/v1/portal/auth/login" -Body @{ username = $BUYER; password = $BUYER_PWD } -Name '05-login'
 $token = (Payload $login).token
-$me = Http-Json -Method GET -Url "$portal/api/portal/user/me" -Token $token -Name '06-me'
+$me = Http-Json -Method GET -Url "$portal/api/v1/portal/user/me" -Token $token -Name '06-me'
 $userId = [long](Payload $me).id
 Check 'setup: buyer registered and logged in' ($null -ne $token -and $userId -gt 0) "userId=$userId"
 
-$addr = Http-Json -Method POST -Url "$portal/api/portal/address" -Token $token -Body @{
+$addr = Http-Json -Method POST -Url "$portal/api/v1/portal/address" -Token $token -Body @{
     receiver = 'Idem Buyer'; phone = '13600000000'; province = 'GD'; city = 'SZ'; district = 'NS'
     detail = 'Idem Road 1'; isDefault = 1
 } -Name '07-address'
@@ -129,7 +129,7 @@ Check 'setup: address created' ($addrId -gt 0) "addressId=$addrId"
 # --------------------------------------------------------------------------- A) same requestId, concurrent
 Write-Host ''
 Write-Host '== A) same requestId fired twice concurrently =='
-Http-Json -Method POST -Url "$portal/api/portal/cart" -Token $token -Body @{ skuId = $skuId; quantity = 2 } -Name '10-cart-A' | Out-Null
+Http-Json -Method POST -Url "$portal/api/v1/portal/cart" -Token $token -Body @{ skuId = $skuId; quantity = 2 } -Name '10-cart-A' | Out-Null
 $lockedBefore = LockedOf $prodId
 $bodyA = @{ addressId = $addrId; requestId = 'race-A' } | ConvertTo-Json -Compress
 # 先把两个请求都发出去（都不 await），再一起收结果 —— 否则就是串行，测不出并发问题
@@ -149,7 +149,7 @@ Check 'A5 cart checked rows were consumed' ([int](Sql "SELECT COUNT(*) FROM t_ca
 # --------------------------------------------------------------------------- B) different requestIds, concurrent
 Write-Host ''
 Write-Host '== B) different requestIds fired concurrently =='
-Http-Json -Method POST -Url "$portal/api/portal/cart" -Token $token -Body @{ skuId = $skuId; quantity = 3 } -Name '20-cart-B' | Out-Null
+Http-Json -Method POST -Url "$portal/api/v1/portal/cart" -Token $token -Body @{ skuId = $skuId; quantity = 3 } -Name '20-cart-B' | Out-Null
 $lockedBefore = LockedOf $prodId
 $ordersBefore = OrderCountAll $userId
 $raceB1 = Start-RaceOrder $token (@{ addressId = $addrId; requestId = 'race-B1' } | ConvertTo-Json -Compress)
@@ -169,7 +169,7 @@ Write-Host '== C) sequential retry with the same requestId =='
 $lockedBefore = LockedOf $prodId
 $ordersBefore = OrderCountAll $userId
 # 注意：Http-Json 内部会 ConvertTo-Json，这里必须传 hashtable，传已序列化的字符串会被二次编码
-$retry = Http-Json -Method POST -Url "$portal/api/portal/order" -Token $token -Body @{ addressId = $addrId; requestId = 'race-A' } -Name '30-retry-A'
+$retry = Http-Json -Method POST -Url "$portal/api/v1/portal/order" -Token $token -Body @{ addressId = $addrId; requestId = 'race-A' } -Name '30-retry-A'
 Check 'C1 retry returns the original order' ((Code $retry) -eq 200 -and (Payload $retry).orderId -eq $orderA1) "code=$(Code $retry) orderId=$((Payload $retry).orderId) expect=$orderA1"
 Check 'C2 retry created no new order' ((OrderCountAll $userId) -eq $ordersBefore) "orders=$ordersBefore -> $(OrderCountAll $userId)"
 Check 'C3 retry did not lock stock again' ((LockedOf $prodId) -eq $lockedBefore) "locked $lockedBefore -> $(LockedOf $prodId)"
@@ -177,7 +177,7 @@ Check 'C3 retry did not lock stock again' ((LockedOf $prodId) -eq $lockedBefore)
 # --------------------------------------------------------------------------- D) no requestId, concurrent
 Write-Host ''
 Write-Host '== D) no requestId at all, concurrent (old clients) =='
-Http-Json -Method POST -Url "$portal/api/portal/cart" -Token $token -Body @{ skuId = $skuId; quantity = 1 } -Name '40-cart-D' | Out-Null
+Http-Json -Method POST -Url "$portal/api/v1/portal/cart" -Token $token -Body @{ skuId = $skuId; quantity = 1 } -Name '40-cart-D' | Out-Null
 $lockedBefore = LockedOf $prodId
 $ordersBefore = OrderCountAll $userId
 $noId = @{ addressId = $addrId } | ConvertTo-Json -Compress
@@ -196,7 +196,7 @@ Check 'D3 stock locked exactly once (delta=1)' ((LockedOf $prodId) -eq ($lockedB
 Write-Host ''
 Write-Host '== E) over-long requestId =='
 $longId = 'x' * 65
-$tooLong = Http-Json -Method POST -Url "$portal/api/portal/order" -Token $token -Body @{ addressId = $addrId; requestId = $longId } -Name '50-too-long'
+$tooLong = Http-Json -Method POST -Url "$portal/api/v1/portal/order" -Token $token -Body @{ addressId = $addrId; requestId = $longId } -Name '50-too-long'
 Check 'E1 over-long requestId rejected with 400' ((Code $tooLong) -eq 400) "code=$(Code $tooLong) http=$($tooLong.http)"
 
 # --------------------------------------------------------------------------- F) malformed body
@@ -204,7 +204,7 @@ Write-Host ''
 Write-Host '== F) malformed request body =='
 # 传字符串而不是对象 -> Http-Json 会再序列化一次，服务端收到「字符串形式的 JSON」
 # 以前会落到 Exception 兜底变成 code 500，现已按 400 处理（客户端的错不该算服务端错误）
-$bad = Http-Json -Method POST -Url "$portal/api/portal/order" -Token $token -Body '{"addressId":1}' -Name '60-bad-body'
+$bad = Http-Json -Method POST -Url "$portal/api/v1/portal/order" -Token $token -Body '{"addressId":1}' -Name '60-bad-body'
 Check 'F1 malformed body -> 400, not 500' ((Code $bad) -eq 400) "code=$(Code $bad) http=$($bad.http)"
 
 # --------------------------------------------------------------------------- cleanup

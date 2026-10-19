@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # Timeout-job verification: the "close expired unpaid orders" job must not be a
 # single point of failure, and must close each order exactly once.
 #
@@ -95,10 +95,10 @@ Check 'setup: both apps started' $true 'logs\admin.log + logs\portal.log'
 Purge
 Write-Host '   leftovers purged'
 
-$adm = Http-Json -Method POST -Url "$admin/api/admin/auth/login" -Body @{ username = 'malladmin'; password = 'admin123456' } -Name '01-admin-login'
+$adm = Http-Json -Method POST -Url "$admin/api/v1/admin/auth/login" -Body @{ username = 'malladmin'; password = 'admin123456' } -Name '01-admin-login'
 $adminToken = (Payload $adm).token
-$cat = Http-Json -Method POST -Url "$admin/api/admin/category" -Token $adminToken -Body @{ parentId = 0; name = $CAT; sort = 91 } -Name '02-cat'
-$prod = Http-Json -Method POST -Url "$admin/api/admin/product" -Token $adminToken -Body @{
+$cat = Http-Json -Method POST -Url "$admin/api/v1/admin/category" -Token $adminToken -Body @{ parentId = 0; name = $CAT; sort = 91 } -Name '02-cat'
+$prod = Http-Json -Method POST -Url "$admin/api/v1/admin/product" -Token $adminToken -Body @{
     categoryId = (Payload $cat); name = $ITEM; subTitle = 'timeout job'; price = 10
     skus = @( @{ skuCode = $SPEC; spec = $SPEC; price = 10; stock = $STOCK } )
 } -Name '03-product'
@@ -106,10 +106,10 @@ $prodId = [long](Payload $prod)
 $skuId = [long](Sql "SELECT id FROM t_sku WHERE product_id = $prodId LIMIT 1;")
 Check 'setup: test product ready' ($prodId -gt 0 -and $skuId -gt 0) "productId=$prodId skuId=$skuId stock=$STOCK"
 
-Http-Json -Method POST -Url "$portal/api/portal/auth/register" -Body @{ username = $BUYER; password = $BUYER_PWD; nickname = 'Timeout Buyer' } -Name '04-register' | Out-Null
-$login = Http-Json -Method POST -Url "$portal/api/portal/auth/login" -Body @{ username = $BUYER; password = $BUYER_PWD } -Name '05-login'
+Http-Json -Method POST -Url "$portal/api/v1/portal/auth/register" -Body @{ username = $BUYER; password = $BUYER_PWD; nickname = 'Timeout Buyer' } -Name '04-register' | Out-Null
+$login = Http-Json -Method POST -Url "$portal/api/v1/portal/auth/login" -Body @{ username = $BUYER; password = $BUYER_PWD } -Name '05-login'
 $token = (Payload $login).token
-$addr = Http-Json -Method POST -Url "$portal/api/portal/address" -Token $token -Body @{
+$addr = Http-Json -Method POST -Url "$portal/api/v1/portal/address" -Token $token -Body @{
     receiver = 'Timeout Buyer'; phone = '13500000000'; province = 'GD'; city = 'SZ'; district = 'NS'
     detail = 'Timeout Road 1'; isDefault = 1
 } -Name '06-address'
@@ -119,8 +119,8 @@ Check 'setup: buyer + address ready' ($null -ne $token -and $addrId -gt 0) "addr
 # 下单接口在 portal 上，所以「建单」和「让它过期」分成两步：
 # C 阶段需要「先在两个应用都活着时建单，再停掉 portal，然后才让它过期」，这样才能证明是 admin 关的。
 function New-Order([string]$tag) {
-    Http-Json -Method POST -Url "$portal/api/portal/cart" -Token $token -Body @{ skuId = $skuId; quantity = 2 } -Name "$tag-cart" | Out-Null
-    $order = Http-Json -Method POST -Url "$portal/api/portal/order" -Token $token -Body @{ addressId = $addrId; requestId = $tag } -Name "$tag-order"
+    Http-Json -Method POST -Url "$portal/api/v1/portal/cart" -Token $token -Body @{ skuId = $skuId; quantity = 2 } -Name "$tag-cart" | Out-Null
+    $order = Http-Json -Method POST -Url "$portal/api/v1/portal/order" -Token $token -Body @{ addressId = $addrId; requestId = $tag } -Name "$tag-order"
     return [long](Payload $order).orderId
 }
 

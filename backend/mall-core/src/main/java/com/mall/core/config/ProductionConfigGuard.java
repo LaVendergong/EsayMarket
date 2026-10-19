@@ -45,8 +45,28 @@ public class ProductionConfigGuard {
         // 数据库口令只要求「真被注入」；是否等于开发默认值是 DBA 的事，这里不做一刀切，
         // 否则本地想按 prod 方式自测都会被挡住
         requireReal("spring.datasource.password", null);
+        checkCorsOrigins();
 
         log.info("[prod 启动自检] 通过：JWT 密钥与数据库口令均已从环境变量注入");
+    }
+
+    /**
+     * prod 下不允许 CORS 通配来源。
+     *
+     * <p>本项目开着 {@code allowCredentials=true}，一旦来源是 {@code *}，
+     * 任意站点都能带着用户凭证调后端 —— 这是最典型的「看起来能跑、实际已经失守」的配置。
+     */
+    private void checkCorsOrigins() {
+        String origins = env.getProperty("mall.cors.allowed-origins");
+        if (origins == null) {
+            return;
+        }
+        for (String origin : origins.split(",")) {
+            if ("*".equals(origin.trim())) {
+                throw new IllegalStateException("[prod 启动自检失败] mall.cors.allowed-origins 不能包含 *"
+                        + "（本项目开启 allowCredentials，通配来源等于允许任意站点携带用户凭证调用）");
+            }
+        }
     }
 
     /**

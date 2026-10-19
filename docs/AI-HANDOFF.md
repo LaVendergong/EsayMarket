@@ -101,6 +101,7 @@ D:\projects\mall\
 │   ├── p3-verify.ps1             P3 购物车+订单端到端验证（61 项断言，含并发防超卖与超时关单）
 │   ├── idempotency-verify.ps1    下单幂等的真并发验证（22 项断言：同/异 requestId 并发、重试、畸形体）
 │   ├── timeout-job-verify.ps1    超时关单验证（18 项断言：单应用能关 + 两应用只关一次）
+│   ├── security-verify.ps1       生产加固验证（17 项断言：traceId / CORS 白名单 / 登录限流）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -181,13 +182,16 @@ cd D:\projects\mall\backend
 mvn -B test
 ```
 
-现有单元测试（**44 项**，覆盖「错了会造成钱/库存问题」的分支）：
+现有单元测试（**62 项**，覆盖「错了会造成钱/库存问题」的分支）：
 
 | 测试类 | 覆盖 |
 |---|---|
 | `mall-common` `JwtUtilTest`（5） | 签发/解析往返、换密钥解不开、过期与篡改被拒、过短密钥直接报错 |
 | `mall-common` `GlobalExceptionHandlerTest`（5） | 业务异常保留自己的码；**畸形请求体/缺参数 → 400 而不是 500**；方法不支持 → 真 405；未知异常 → 500 |
-| `mall-core` `ProductionConfigGuardTest`（10） | prod 下拒绝开发默认密钥 / 未解析占位符 / 空值 / 长度不足；dev 不受影响 |
+| `mall-core` `ProductionConfigGuardTest`（12） | prod 下拒绝开发默认密钥 / 未解析占位符 / 空值 / 长度不足 / **CORS 通配**；dev 不受影响 |
+| `mall-core` `LoginThrottleTest`（7） | 未达上限放行、达上限拒绝（带剩余秒数）、成功清零、不同用户名互不影响、窗口过期自动解锁且计数从 1 重新开始 |
+| `mall-core` `UserServiceImplTest`（5） | 被限流时**不查库不跑 BCrypt**、用户名不存在与密码错误返回同样的码、失败计数、成功清零、禁用账号不清计数 |
+| `mall-core` `TraceIdFilterTest`（4） | 生成 16 位 hex 并写入 MDC/响应头、请求结束清理 MDC、沿用上游值、可疑/超长值被替换 |
 | `mall-core` `OrderServiceImplTest`（24） | 下单：空车 2004、无地址 2010、下架 2002、锁库存失败 2003、正常下单的金额/地址快照/清购物车且**不计销量**、**幂等键命中直接返回原单且不动库存**、requestId 过长 400；**立即购买：缺 skuId/数量非法 400、SKU 不存在 2007、下架 2002、锁库存失败 2003、正常下单且断言购物车零交互、幂等键命中**；支付：超时拒付、状态被抢先流转时幂等拒绝、成功扣库存且**同商品多 SKU 销量合并**、扣库存失败 2003；取消释放锁定库存、重复取消被拒、越权看到 3001、超时关单跳过已被别人处理的单 |
 
 CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在全新 MySQL 上按顺序跑 V1..V4**、两个前端 typecheck+build。
@@ -204,6 +208,8 @@ CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在�
 | `MALL_DB_URL` / `MALL_DB_USERNAME` / `MALL_DB_PASSWORD` | 数据库连接 | localhost / root / `521131` |
 | `MALL_ORDER_EXPIRE_MINUTES` | 未支付订单有效期 | 30 |
 | `MALL_ORDER_TIMEOUT_JOB_ENABLED` / `_INTERVAL_MILLIS` | 超时关单任务开关与间隔 | **两个应用都是 true**；10 秒 |
+| `MALL_CORS_ALLOWED_ORIGINS` | 允许跨域的来源（逗号分隔）。**绝不能含 `*`**（prod 自检会拦） | 两个前端的 dev 地址 |
+| `MALL_LOGIN_MAX_FAILURES` / `MALL_LOGIN_LOCK_SECONDS` | 登录失败限流：窗口内失败几次后锁多久 | 5 次 / 300 秒 |
 | `SERVER_PORT` | 服务端口 | 8081 / 8090 |
 
 上线方式：`--spring.profiles.active=prod`（或 `SPRING_PROFILES_ACTIVE=prod`）。prod 下：
@@ -291,8 +297,8 @@ mysql -uroot -p*** -N --default-character-set=utf8mb4 -e "source D:/projects/mal
 - Claims：`sub` = userId，`role`，`username`
 - 取当前用户：`UserContext.requireUserId()`（未登录抛 401）
 - 路径规则（见 `com.mall.core.config.SecurityConfig`）：
-  - 白名单：`/api/portal/auth/**`、`/api/admin/auth/**`、swagger/knife4j/actuator
-  - `/api/admin/**` → 需要 `ROLE_ADMIN`
+  - 白名单：`/api/v1/portal/auth/**`、`/api/v1/admin/auth/**`、swagger/knife4j/actuator
+  - `/api/v1/admin/**` → 需要 `ROLE_ADMIN`
   - `/api/**` → 需要登录
 - 密码用 BCrypt 存储
 
@@ -308,10 +314,10 @@ Knife4j：服务起来后访问 `http://localhost:<port>/doc.html`
 - **分类**：`parent_id = 0` 为顶级；`status` 1 正常 / 0 禁用。前台分类树只返回 `status=1`。
   按分类筛商品会**自动带上所有后代分类**（选「数码」能搜到「手机」「笔记本」下的商品）。
 - **前台列表排序** `sort`：`default`(综合=销量↓) / `price_asc` / `price_desc` / `sales_desc` / `new`。
-- **SKU 更新语义**（`PUT /api/admin/product/{id}`）：按 id 对齐 —— 传了 id 就更新、没 id 就新增、原有但没出现的**逻辑删除**。
+- **SKU 更新语义**（`PUT /api/v1/admin/product/{id}`）：按 id 对齐 —— 传了 id 就更新、没 id 就新增、原有但没出现的**逻辑删除**。
 - **删除语义**：商品删除 = 商品 + 其 SKU 逻辑删除；分类只有在「没有子分类且没有商品」时才允许删除（否则 2006）。
-- **浏览类接口匿名开放**：`SecurityConfig` 里 `GET /api/portal/category/**`、`GET /api/portal/product/**` 是 `permitAll`，
-  其余 `/api/**` 仍需登录，`/api/admin/**` 仍需 `ROLE_ADMIN`。POST/PUT/DELETE 到这些路径**依然要登录**。
+- **浏览类接口匿名开放**：`SecurityConfig` 里 `GET /api/v1/portal/category/**`、`GET /api/v1/portal/product/**` 是 `permitAll`，
+  其余 `/api/**` 仍需登录，`/api/v1/admin/**` 仍需 `ROLE_ADMIN`。POST/PUT/DELETE 到这些路径**依然要登录**。
 - **分页**：`pageSize` 上限 100（服务端 clamp），MyBatis-Plus 分页拦截器 `maxLimit=500`。
 
 ### 6.6 购物车 / 订单域约定（P3）
@@ -349,14 +355,14 @@ Knife4j：服务起来后访问 `http://localhost:<port>/doc.html`
 ### P1 验证结果（可作为回归基线）
 
 ```
-POST /api/portal/auth/register                       -> code 200
-POST /api/portal/auth/login                          -> code 200, 返回 token
-GET  /api/portal/user/me   (带 token)                -> code 200
-GET  /api/portal/user/me   (不带 token)              -> HTTP 401
-POST /api/portal/address                             -> code 200
-GET  /api/portal/address                             -> code 200, 返回列表
-POST /api/admin/auth/login (普通用户)                -> code 403 "非管理员账号，无法登录后台"
-GET  /api/admin/ping       (匿名)                    -> HTTP 401
+POST /api/v1/portal/auth/register                       -> code 200
+POST /api/v1/portal/auth/login                          -> code 200, 返回 token
+GET  /api/v1/portal/user/me   (带 token)                -> code 200
+GET  /api/v1/portal/user/me   (不带 token)              -> HTTP 401
+POST /api/v1/portal/address                             -> code 200
+GET  /api/v1/portal/address                             -> code 200, 返回列表
+POST /api/v1/admin/auth/login (普通用户)                -> code 403 "非管理员账号，无法登录后台"
+GET  /api/v1/admin/ping       (匿名)                    -> HTTP 401
 ```
 
 ### P2 验证结果（35/35 全绿，可回归）
@@ -371,9 +377,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "D:\projects\mall\scripts\p2
 证据落在 `tmp\p2\*.json`（每个请求的响应体）与 `tmp\p2\summary.txt`。覆盖：
 
 - **前台（匿名，不带 token）**
-  - `GET /api/portal/category/tree`：只返回启用分类，第一版是嵌套树（含 `children`）
-  - `GET /api/portal/product/page`：只返回上架商品；`categoryId`（自动聚合后代分类）、`keyword`（搜 name/sub_title）、`minPrice`/`maxPrice`、`sort=price_asc|price_desc|sales_desc|new`
-  - `GET /api/portal/product/{id}`：详情含 SKU 列表与图集数组；不存在 → `2001`；已下架 → `2002`
+  - `GET /api/v1/portal/category/tree`：只返回启用分类，第一版是嵌套树（含 `children`）
+  - `GET /api/v1/portal/product/page`：只返回上架商品；`categoryId`（自动聚合后代分类）、`keyword`（搜 name/sub_title）、`minPrice`/`maxPrice`、`sort=price_asc|price_desc|sales_desc|new`
+  - `GET /api/v1/portal/product/{id}`：详情含 SKU 列表与图集数组；不存在 → `2001`；已下架 → `2002`
 - **后台（需 role=1 的 token）**
   - 分类：`tree`/`POST`/`PUT /{id}`/`PUT /{id}/status`/`DELETE /{id}`；有子分类或商品时删除被拒（`2006`）；同级同名（`2008`）；父分类不能是自己或自己的子分类
   - 商品：`page`（含下架、可按 status 筛）/`GET /{id}`/`POST`/`PUT /{id}`/`PUT /{id}/status`/`DELETE /{id}`
@@ -381,7 +387,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "D:\projects\mall\scripts\p2
     - 下架后前台详情 `2002`、前台列表不含；删除后前台 `2001`、后台列表 0 条
   - 参数校验：缺 name → `400`；分类不存在 → `2005`；SKU 列表为空 → `400`
   - 库存汇总：新商品 2 个 SKU（8 + 3）在前台列表显示 `stock=11`
-- **鉴权 / 协议边界**：匿名打 `/api/admin/**` → HTTP 401；`GET` 打 POST 接口 → HTTP 405 + code 405；不存在的路径 → HTTP 404 + code 404
+- **鉴权 / 协议边界**：匿名打 `/api/v1/admin/**` → HTTP 401；`GET` 打 POST 接口 → HTTP 405 + code 405；不存在的路径 → HTTP 404 + code 404
 
 ### P3 验证结果（61/61 全绿，可回归）
 
@@ -426,12 +432,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "D:\projects\mall\tmp\p3fix\
 
 - dev server 吐出 SPA 外壳；管理员登录 `code=200 role=1`（走 vite 代理 → 8081）
 - 分类树 / 商品分页 / 商品详情（含 SKU）/ 订单分页 全部 `code=200`
-- **协议边界**：密码错误是 HTTP 200 + `code=1003`；匿名打 `/api/admin/**` 是真 HTTP 401
+- **协议边界**：密码错误是 HTTP 200 + `code=1003`；匿名打 `/api/v1/admin/**` 是真 HTTP 401
 
 管理后台的页面：登录 / 分类管理 / 商品管理（列表 → **详情**、新增、编辑）/ 订单管理（列表 → 详情）。
 
 > 商品详情页是后补的（`admin-web\src\views\ProductDetailView.vue`，路由 `/product/:id`，
-> 数据来自 `GET /api/admin/product/{id}`），单独验过 `tmp\admin-web\detail-smoke.ps1`（**9/9**，
+> 数据来自 `GET /api/v1/admin/product/{id}`），单独验过 `tmp\admin-web\detail-smoke.ps1`（**9/9**，
 > 见 `tmp\admin-web\detail-smoke.txt`）：dev server 能编译并吐出该组件、router 模块里确实注册了
 > `productDetail`、详情接口返回图集与 SKU 三态库存（总/锁定/可售）、不存在的 id 返回 `2001` 时页面走空状态。
 > 该页把 `detail` 的 HTML 标签剥掉当纯文本显示（**故意不用 `v-html`**，不给后台开 XSS 口子）。
@@ -449,7 +455,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "D:\projects\mall\tmp\p3fix\
 > 脚本用专用测试商品（`H5 Test*` / `P3FIX*` 前缀）并在结尾清理，不污染演示数据。
 
 **H5 的一处已知取舍（已在 P6 修掉）**：原先「立即购买」只能靠「先把该 SKU 加购 → 再把购物车其它条目取消选中 → 跳结算」
-绕出来，**会覆盖用户原有的勾选**。P6 新增了 `POST /api/portal/order/direct` 直连下单入口，见下方「P1 立即购买」。
+绕出来，**会覆盖用户原有的勾选**。P6 新增了 `POST /api/v1/portal/order/direct` 直连下单入口，见下方「P1 立即购买」。
 
 ### 前端真实渲染检查（`scripts\web-check.mjs`，14/14 + 0 告警）
 
@@ -514,7 +520,7 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 
 **解决**：新增直连下单入口，不读也不写购物车。
 
-- 接口：`POST /api/portal/order/direct`，入参 `CreateDirectOrderDTO { skuId, quantity, addressId, requestId }`
+- 接口：`POST /api/v1/portal/order/direct`，入参 `CreateDirectOrderDTO { skuId, quantity, addressId, requestId }`
 - 服务层把「建单」抽成共用的 `placeOrder(userId, requestId, address, lines)`（`OrderLine` 小 record），
   `create()`（购物车结算）与 `createDirect()`（立即购买）都调它 —— 两个入口的校验、原子锁库存、金额快照、幂等行为完全一致，
   差别只在「谁提供要结算的行」以及「要不要清购物车」
@@ -594,6 +600,24 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 > 这套检查顺带抓出两个真 bug（见 §8 第 33 条）：两个订单详情页把 `onMounted` 里异步 `load()` 的 reject
 > 放了出去，于是「订单不存在」这种**正常业务结果**会被错误边界接住、整页变成「页面出错了」。
 > 现在两个页面都自己 catch 并显示业务空状态，断言改成 `订单不存在时显示业务空状态`。
+37. **批量改含中文的 `.ps1` 必须保持 UTF-8 BOM**：我用 PowerShell 做 `/api/` → `/api/v1/` 批量替换时，
+    `WriteAllText` 用了**无 BOM** 的 `UTF8Encoding($false)`，把 5 个脚本的 BOM 全弄丢了 →
+    PowerShell 5.1 按 GBK 解析、中文把后面的引号吞掉，报 `字符串缺少终止符` / `UnexpectedToken`
+    （§8 第 11、28 条同一个坑的第三种踩法）。
+    正确写法：读 `[System.Text.Encoding]::UTF8`，写 `New-Object System.Text.UTF8Encoding($true)`。
+    改完**立刻用解析器验**（比真跑一遍快得多）：
+
+    ```powershell
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
+    # $errors.Count 必须为 0
+    ```
+38. **等「页面出现某段文字」还不够，要等「你要点的那个操作所需的数据」就绪**（§8 第 23 条的变体）：
+    结算页 `load()` 是**先取地址、再取购物车清单**，地址卡片一出现测试就去点「提交订单」，
+    而此时 `items` 还是空的 → `submit()` 直接 return（只弹个 toast），后端根本没收到请求。
+    症状很有迷惑性：页面文本里商品明明在（那是稍后才加载完的），但断言「跳到订单详情」失败。
+    正确写法是点之前先 `waitText(商品名)`；顺带也修了真实体验——**提交按钮在加载期间禁用**
+    （慢网络下用户真的会点到一个没反应的按钮）。
 
 **问题 2：主包过大。** admin-web 入口 chunk **1,037 kB**（Element Plus 全量 `app.use`），H5 **321 kB**（Vant 全量）。
 
@@ -620,8 +644,61 @@ Element Plus 的中文语言包改由根组件 `<el-config-provider :locale="zhC
 重新下载业务代码那个文件）。⚠️ 不能用 `{ 'vendor-element-plus': ['element-plus'] }` 的对象式写法，
 实测会让 element-plus 从 ~396 kB 反弹到 799 kB（见 §8 第 32 条）；所以 admin-web 对 element-plus
 **刻意返回 undefined**（让它随主流），只拆 vue 与其它依赖。
+
+### P4 生产加固（17/17）
+
+四项都是「上线前不落地、就会以奇怪方式咬人」的。
+
+**1. CORS 白名单**（原来是 `allowedOriginPatterns("*")` + `allowCredentials(true)`）
+通配来源 + 携带凭证 = **任意站点都能拿用户身份调后端**。现在改成显式白名单
+`mall.cors.allowed-origins`（环境变量 `MALL_CORS_ALLOWED_ORIGINS`），dev 默认是两个前端地址；
+prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Trace-Id` 加进 `exposedHeaders`，
+否则前端读不到这个响应头。
+
+**2. 登录失败限流**（原来登录接口可无限爆破——BCrypt 只让每次尝试变慢，挡不住持续轮询）
+`LoginThrottle`：同一用户名在窗口内失败达到 `max-failures`（默认 5）就锁 `lock-seconds`（默认 300）秒。
+
+- 锁定期间**连正确密码也拒**（否则「再试一次对的」就把限流绕过去了）
+- 密码正确才清计数；禁用账号不清（免得被拿来刷掉别人的锁定状态）
+- 用户名不存在**也计数**（否则错误信息的差异就是用户名枚举探针）
+- 被限流时**不查库、不跑 BCrypt**（否则限流反而成了压测入口）
+
+两个刻意的取舍：① 按**用户名**而非 IP 计数——本项目生产走 nginx 反代，`remoteAddr` 是代理地址，
+拿不到可信客户端 IP，按 IP 反而会把所有用户算成一伙；副作用是「知道用户名就能把人锁住」，
+所以窗口故意设短。② 计数在**进程内存**里——单实例够用、重启即清零；多副本部署必须换共享存储，
+否则上限会被放大到「副本数 × maxFailures」。
+
+**3. traceId**（原来线上出问题只能靠时间戳在一堆并发日志里捞）
+`TraceIdFilter`（最高优先级）：沿用上游 `X-Trace-Id`（跨服务能串起来），没有就生成 16 位 hex；
+写入 MDC + 响应头；日志格式用 `%X{traceId:--}` 带出来；`finally` 清理 MDC（避免线程复用串号）。
+上游值会被长度与字符白名单卡住——它要进日志，不能让换行伪造日志行。
+
+**4. 接口版本 `/api/v1`**（原来全是裸 `/api/...`，第一次破坏性变更就没有迁移余地）
+13 个 Controller 的 `@RequestMapping`、SecurityConfig 的匹配规则、两个前端 `baseURL`、
+7 个验证脚本全部升级到 `/api/v1/...`。**没有保留旧路径别名**——旧路径直接 404，这才是版本前缀该有的行为。
+
+**验证**：`scripts\security-verify.ps1`（**17/17**，产物 `tmp\security\summary.txt`）：
+
+```
+[PASS] A1 response carries X-Trace-Id (16 hex)
+[PASS] A2 upstream X-Trace-Id is honoured
+[PASS] A3 traceId really lands in the log line
+[PASS] A4 over-long upstream value is replaced, not echoed
+[PASS] B1 whitelisted origin gets Allow-Origin :: allow=http://localhost:5173
+[PASS] B2 foreign origin gets NO Allow-Origin :: http=403
+[PASS] C2 CORRECT password is refused while locked (1005) :: 请 299 秒后再试
+[PASS] C4 other usernames are unaffected
+[PASS] C5 two failures then success still works (below limit)
+[PASS] C6 admin login still works
+```
+
+配套单测 +16 项：`LoginThrottleTest`(7)、`UserServiceImplTest`(5)、`TraceIdFilterTest`(4)、
+`ProductionConfigGuardTest` 增 2 项 CORS 断言。
+
+> A4 用「超长值」而不是「换行注入」：curl 无法在 header 里发真实换行（会截断成 `abc`，
+> 而 `abc` 本身合法、被原样沿用是对的）。换行注入那条由 `TraceIdFilterTest` 直接单测覆盖。
 | 前端全局错误兜底 + UI 库按需引入 | ✅ | 见下方「P2 前端错误兜底与包体」；`web-check` 24/24 |
-| 生产加固（CORS 白名单 / 登录限流 / traceId / 接口版本） | ⬜ | 待做 |
+| 生产加固（CORS 白名单 / 登录限流 / traceId / 接口版本） | ✅ | 见下方「P4 生产加固」；`security-verify.ps1` 17/17 |
 
 ### P1 下单幂等（22/22）
 

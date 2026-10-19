@@ -8,7 +8,7 @@ import { auth } from '@/stores/auth'
  * - 业务失败：HTTP 200 但 code != 200，弹错误并 reject
  * - 未认证：真正的 HTTP 401（body 为空），清 token 回登录页
  */
-export const http = axios.create({ baseURL: '/api', timeout: 15000 })
+export const http = axios.create({ baseURL: '/api/v1', timeout: 15000 })
 
 http.interceptors.request.use((config) => {
   if (auth.token.value) {

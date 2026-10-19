@@ -93,14 +93,14 @@ cd frontend/portal-web && pnpm install && pnpm dev   # http://localhost:5174
 
 ### 下单幂等（客户端必读）
 
-`POST /api/portal/order` 支持 `requestId` 字段（可选，最长 64 字符）。**同一次结算里请固定不变地传同一个值**
+`POST /api/v1/portal/order` 支持 `requestId` 字段（可选，最长 64 字符）。**同一次结算里请固定不变地传同一个值**
 （例如一个 UUID），这样重复提交（双击 / 网络重试）只会落一单，并返回原来那一单的 `orderId`。
 不传也能保证不会并发重复下单（服务端有购物车行锁兜底），只是重试时会返回「购物车为空」而不是原单。
 
 ## 验证
 
 ```bash
-# 后端单元测试（44 项，纯内存不需要数据库；build.bat 也默认会跑）
+# 后端单元测试（62 项，纯内存不需要数据库；build.bat 也默认会跑）
 cd backend && mvn -B test
 
 # 下单幂等的真并发验证（22 项断言：同/异 requestId 并发、重试、畸形请求体）
@@ -108,6 +108,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/idempotency-verify.p
 
 # 超时关单验证（18 项断言：单应用能关 + 两应用同跑只关一次；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/timeout-job-verify.ps1
+
+# 生产加固验证（17 项断言：traceId / CORS 白名单 / 登录失败限流；会自己停/起后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/security-verify.ps1
 
 # 商品域端到端（36 项断言）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1
@@ -142,6 +145,8 @@ node scripts/web-flow.mjs
 | `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致**，至少 32 字符 |
 | `MALL_DB_PASSWORD` | 数据库口令（两个后端一致） |
 | `MALL_DB_URL` / `MALL_DB_USERNAME` | 数据库连接（默认 localhost / root） |
+| `MALL_CORS_ALLOWED_ORIGINS` | 允许跨域的来源（逗号分隔）。**不能含 `*`**，prod 启动自检会直接拦下 |
+| `MALL_LOGIN_MAX_FAILURES` / `MALL_LOGIN_LOCK_SECONDS` | 登录失败限流（默认 5 次 / 300 秒） |
 
 prod 下的行为差异：
 
@@ -149,6 +154,10 @@ prod 下的行为差异：
 - 超时关单定时任务**两个后端都默认开启**：只在一个应用跑的话，它挂了超时订单就永远不关、锁定库存永不释放。
   并发重复扫描是安全的（关单走条件 UPDATE，只有成功那次才释放库存）。要单点跑就把另一边的
   `MALL_ORDER_TIMEOUT_JOB_ENABLED` 设成 `false`
+- CORS 变成**显式白名单**（原来是通配来源 + 允许携带凭证，等于任意站点可带用户身份调后端）
+- 登录有**失败次数限流**：同一用户名窗口内失败 5 次锁 5 分钟，锁定期间连正确密码也拒
+- 每个响应都带 `X-Trace-Id`（16 位 hex），日志行里也有，排查时让用户把它给你即可
+- 业务接口统一在 **`/api/v1/**`** 下（旧的无版本路径已移除，会 404）
 - 启动时执行 `ProductionConfigGuard` 自检：密钥若为空、是未解析的占位符、是开发默认值或长度不足，
   **应用直接启动失败**，不会带着弱密钥跑起来
 

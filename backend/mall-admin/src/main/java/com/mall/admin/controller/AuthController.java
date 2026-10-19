@@ -17,7 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Tag(name = "后台认证")
 @RestController
-@RequestMapping("/api/admin/auth")
+@RequestMapping("/api/v1/admin/auth")
 @RequiredArgsConstructor
 public class AuthController {
 

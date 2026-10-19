@@ -9,7 +9,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Tag(name = "健康检查")
 @RestController
-@RequestMapping("/api/portal")
+@RequestMapping("/api/v1/portal")
 public class PingController {
 
     @Operation(summary = "ping")

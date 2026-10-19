@@ -16,7 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Tag(name = "后台-订单")
 @RestController
-@RequestMapping("/api/admin/order")
+@RequestMapping("/api/v1/admin/order")
 @RequiredArgsConstructor
 public class OrderController {
 
