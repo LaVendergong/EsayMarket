@@ -10,6 +10,9 @@ import com.mall.core.entity.OrderItem;
 import com.mall.core.entity.Product;
 import com.mall.core.entity.Sku;
 import com.mall.core.enums.OrderStatus;
+import com.mall.core.metric.OrderMetrics;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.mall.core.mapper.CartMapper;
 import com.mall.core.mapper.OrderItemMapper;
 import com.mall.core.mapper.OrderMapper;
@@ -57,13 +60,21 @@ class OrderServiceImplTest {
     @Mock private AddressService addressService;
 
     private OrderServiceImpl service;
+    /** 用真实的 SimpleMeterRegistry，不动 mock，才能顺带断言业务指标确实被打了 */
+    private SimpleMeterRegistry registry;
 
     @BeforeEach
     void setUp() {
         OrderProperties props = new OrderProperties();
         props.setExpireMinutes(30);
+        registry = new SimpleMeterRegistry();
         service = new OrderServiceImpl(orderMapper, orderItemMapper, cartMapper, productMapper, skuMapper,
-                addressService, props);
+                addressService, props, new OrderMetrics(registry));
+    }
+
+    private double counter(String name) {
+        Counter c = registry.find(name).counter();
+        return c == null ? 0d : c.count();
     }
 
     // ------------------------------------------------------------------ 测试数据
@@ -204,6 +215,43 @@ class OrderServiceImplTest {
         assertThat(codeOf(e)).isEqualTo(ResultCode.STOCK_NOT_ENOUGH.getCode());
         verify(orderMapper, never()).insert(any(Order.class));
         verify(cartMapper, never()).deleteChecked(anyLong());
+        // 指标要在抛异常前打上，否则「库存不足陡增」这条告警永远收不到
+        assertThat(counter("mall.orders.stock_shortage")).isEqualTo(1d);
+        assertThat(counter("mall.orders.created")).isZero();
+    }
+
+    @Test
+    void create_happyPath_incrementsOrdersCreatedMetric() {
+        when(cartMapper.selectList(any())).thenReturn(List.of(cart(1L, 10L, 100L, 1)));
+        when(addressService.getOwned(1L, 9L)).thenReturn(address());
+        when(productMapper.selectById(10L)).thenReturn(product(10L, 1));
+        when(skuMapper.selectById(100L)).thenReturn(sku(100L, 10L, "30.00", 5));
+        when(skuMapper.lockStock(100L, 1)).thenReturn(1);
+        when(orderMapper.insert(any(Order.class))).thenAnswer(invocation -> {
+            invocation.getArgument(0, Order.class).setId(1L);
+            return 1;
+        });
+
+        service.create(1L, dtoWithAddress(9L));
+
+        assertThat(counter("mall.orders.created")).isEqualTo(1d);
+        assertThat(counter("mall.orders.stock_shortage")).isZero();
+    }
+
+    @Test
+    void create_withReplayedRequestId_doesNotCountAsANewOrder() {
+        Order existing = order(88L, OrderStatus.UNPAID.getCode(), LocalDateTime.now().plusMinutes(10));
+        existing.setRequestId("req-x");
+        when(cartMapper.selectList(any())).thenReturn(List.of());
+        when(orderMapper.selectOne(any())).thenReturn(existing);
+
+        CreateOrderDTO dto = dtoWithAddress(9L);
+        dto.setRequestId("req-x");
+        service.create(1L, dto);
+
+        // 幂等重放并没有真的建单；如果也算进 mall_orders_created_total，
+        // 一旦客户端开始重试，监控曲线就会被刷高、失去意义
+        assertThat(counter("mall.orders.created")).isZero();
     }
 
     @Test

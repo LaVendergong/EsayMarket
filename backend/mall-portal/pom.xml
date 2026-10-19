@@ -25,6 +25,7 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!-- micrometer-registry-prometheus（/actuator/prometheus）在 mall-core 里声明，两个应用都继承 -->
     </dependencies>
 
     <build>

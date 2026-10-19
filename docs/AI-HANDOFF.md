@@ -105,6 +105,8 @@ D:\projects\mall\
 │   ├── backup-db.ps1             数据库逻辑备份（mysqldump 一致性快照，保留最近 N 份）
 │   ├── restore-db.ps1            从备份恢复（默认恢复到临时库，覆盖 mall 必须 -Force）
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
+│   ├── metrics-verify.ps1        监控验证（16 项断言：prometheus 端点 + 业务计数器真的会动）
+│   ├── admin-crud-verify.mjs     后台分类/商品的 **UI** CRUD 验证（16 项断言）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -637,6 +639,19 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 43. **`e2e-lib.ps1` 要求调用方先定义 8 个变量**（`$root $portal $admin $mysql $java $outDir $reqFile $MysqlPassword`，
     见它文件头）。漏一个就会报「& 后面的表达式无效」这类完全指不到根因的错——这轮踩了两次。
     新写验证脚本时，把这段定义连同 dot-source 一起照抄。
+44. **Element Plus 后台 UI 自动化的 4 个细节**（都在 `admin-crud-verify.mjs` 里踩过）：
+    - `el-tree-select`（EP 2.9）的树节点**没有** `.el-tree-node__label`，文本直接在 `.el-tree-node__content` 上
+      （实测 `.el-tree-node__label` count=0，按它等会一直等到超时）
+    - 用合成事件填 `el-input-number`（set value + dispatch input/change）能驱动 v-model，但会额外冒一条
+      `[Vue warn] Invalid event arguments: event validation failed for event "blur"`。真实用户点旋钮不会这样，
+      属于自动化噪声；该脚本按**精确模式**放行（`web-check` / `web-flow` 仍然零容忍）
+    - 新建商品页**默认已经有一行 SKU**，再点「添加 SKU」会多出空行，保存时报「第 2 个 SKU 价格不能为空」
+    - 断言「某一行里不含某按钮文案」会被**操作列自己**命中：分类被禁用后那颗按钮文案变成「启用」、启用后变成「禁用」。
+      要判状态就盯状态列（启用=正常，禁用=停用），别用按钮文案
+45. **解析 Prometheus 文本时别用 `$` 做行尾锚**：curl 的输出经 PowerShell 之后行尾是 `\r\n`，`$` 前面会多一个 `\r`，
+    永远匹配不上（症状：指标明明在 `/actuator/prometheus` 里，脚本取到的却是 -1）。另外计数器名字带 `_total` 后缀。
+46. **想制造「库存不足」别用「加购一个超大数量」**：`CartService.add` 在**加购阶段**就会校验可售库存并返回 2003，
+    订单根本到不了锁库存那一步（第一版这么写，断言直接失败）。正确做法是**正常加购，再把 SKU 总库存改成 0**。
 38. **等「页面出现某段文字」还不够，要等「你要点的那个操作所需的数据」就绪**（§8 第 23 条的变体）：
     结算页 `load()` 是**先取地址、再取购物车清单**，地址卡片一出现测试就去点「提交订单」，
     而此时 `items` 还是空的 → `submit()` 直接 return（只弹个 toast），后端根本没收到请求。
@@ -740,6 +755,47 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 > 「第一次真正滚动」时是可靠的——**一个可能静默丢日志的日志出口比没有更危险**，所以不带上线。
 > 12-factor 的做法本来就是「只打 stdout，由平台负责轮转」，这里回到那条路上。
 
+### 监控（Prometheus，`metrics-verify.ps1` 16/16）
+
+只有 `/actuator/health` 时，出问题只能看到「进程还活着」，看不到「业务健不健康」。现在两个后端都暴露
+`/actuator/prometheus`（`micrometer-registry-prometheus` 声明在 `mall-core`，两个应用都继承）：
+
+- **通用指标**：JVM、HikariCP 连接池、`http_server_requests_seconds_*`（按 uri/status 分）
+- **业务指标**（`OrderMetrics`，埋在 `placeOrder` 里）：
+  - `mall_orders_created_total` —— 成功建单数。**幂等重放不计**，否则客户端一重试曲线就被刷高
+  - `mall_orders_stock_shortage_total` —— 条件 UPDATE 锁库存失败（库存不足）的次数
+- 暴露范围：dev `health,info,metrics,prometheus`；**prod `health,prometheus`**（prod 不暴露 info/metrics 明细）
+
+建议的告警规则（比「CPU 高」有用得多）：
+
+```yaml
+- alert: NoOrdersInBusinessHours
+  expr: rate(mall_orders_created_total[5m]) == 0        # 营业时段下单掉到 0 = 链路断了
+- alert: StockShortageSpike
+  expr: rate(mall_orders_stock_shortage_total[5m]) > 10 # 陡增 = 被抢空或在刷单
+- alert: OrderApiErrors
+  expr: rate(http_server_requests_seconds_count{uri=~".*portal/order.*",status=~"5.."}[5m]) > 0
+```
+
+验证（`scripts\metrics-verify.ps1`，16/16）：端点可抓取、通用与业务指标都在、**建单 +1**、
+**幂等重放不计**、**库存不足 +1**（`tests` 里也有 `OrderServiceImplTest` 用 `SimpleMeterRegistry` 盯着这两条）。
+
+### 后台 CRUD 的 UI 用例（`admin-crud-verify.mjs` 16/16）
+
+`p2-verify` 只测接口、`web-check` 只测渲染、`web-flow` 只覆盖订单发货 —— **后台最常用的
+「建分类 → 建商品 → 上下架 → 删除」此前没有一次是从界面上点过的**。现在补上：
+
+```
+1. 分类：新增顶级分类 → 表格出现 → 编辑改名 → 禁用 → 重新启用
+2. 商品：新增（分类树选择 + SKU 行填写）→ 列表出现 → 下架 → 详情页显示下架 → 删除
+3. 删除分类（二次确认）
+```
+
+```bash
+node scripts\admin-crud-verify.mjs      # 需要：两个后端 + admin dev server + Chrome
+# 报告：tmp\admin-crud\report.txt
+```
+
 ### 数据库备份 / 恢复（`backup-restore-verify.ps1` 13/13）
 
 ```bash
@@ -774,6 +830,8 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 日志与磁盘（避免长期跑吃满磁盘） | ✅ | 只打 stdout + docker `json-file` 上限，见下方「日志策略」 |
 | 数据库备份 / 恢复 | ✅ | `scripts\backup-db.ps1` / `restore-db.ps1`，真演练 `backup-restore-verify.ps1` 13/13 |
 | 测试覆盖（H5 取消订单） | ✅ | `web-flow.mjs` 39/39（新增取消订单 + 释放库存断言） |
+| 监控指标（Prometheus） | ✅ | `/actuator/prometheus` + 两个业务计数器，见下方「监控」；`metrics-verify.ps1` 16/16 |
+| 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）
 

@@ -30,6 +30,12 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-security</artifactId>
         </dependency>
+        <!-- OrderMetrics（com.mall.core.metric）要 io.micrometer.core，
+             放在 core 里两个应用都能拿到 /actuator/prometheus；版本由 Spring Boot BOM 管 -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
         <!-- 只为 com.mall.core.config.OpenApiConfig（两个应用共用的接口文档元信息）；
              版本由父 POM 的 dependencyManagement 管，和 admin/portal 各自声明的那个是同一个 -->
         <dependency>

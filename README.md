@@ -112,6 +112,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/timeout-job-verify.p
 # 备份 / 恢复演练（13 项断言：备份→恢复到临时库→逐表比对→清理，不碰主库）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-restore-verify.ps1
 
+# 监控指标验证（16 项断言：/actuator/prometheus + 业务计数器真的会动；会自己停/起后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/metrics-verify.ps1
+
 # 生产加固验证（17 项断言：traceId / CORS 白名单 / 登录失败限流；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/security-verify.ps1
 
@@ -126,6 +129,9 @@ node scripts/web-check.mjs
 
 # 前端全流程交互测试（39 项断言：真点按钮跑完整个购物闭环，含「立即购买」与「取消订单」）
 node scripts/web-flow.mjs
+
+# 管理后台 UI CRUD（16 项断言：分类增删改禁用 / 商品新增-下架-删除）
+node scripts/admin-crud-verify.mjs
 ```
 
 前两个脚本会自己 stop → build → run → 跑断言 → 汇总，证据落在 `tmp/<阶段>/`。
@@ -165,6 +171,10 @@ prod 下的行为差异：
   裸机长跑请把 stdout 交给 `logrotate` 或 systemd-journald。后端**不自带**文件滚动（原因见 `docs/AI-HANDOFF.md`）
 - **备份**：`scripts/backup-db.ps1` 做一致性快照（保留最近 7 份）；`scripts/backup-restore-verify.ps1`
   会真的备份→恢复到临时库→逐表比对→清理，用来证明「备份能恢复」。**没有恢复过的备份不算备份。**
+- **监控**：两个后端都暴露 `/actuator/prometheus`（JVM / 连接池 / HTTP 指标 + 两个业务计数器）。
+  最值得配的两条告警是 `rate(mall_orders_created_total[5m]) == 0`（营业时段下单掉到 0 = 链路断了）
+  和 `rate(mall_orders_stock_shortage_total[5m]) > 10`（库存被抢空或在刷单）。
+  prod 只暴露 `health,prometheus`。详见 `docs/AI-HANDOFF.md` 的「监控」小节。
 - 启动时执行 `ProductionConfigGuard` 自检：密钥若为空、是未解析的占位符、是开发默认值或长度不足，
   **应用直接启动失败**，不会带着弱密钥跑起来
 

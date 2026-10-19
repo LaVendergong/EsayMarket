@@ -20,6 +20,7 @@ import com.mall.core.mapper.OrderItemMapper;
 import com.mall.core.mapper.OrderMapper;
 import com.mall.core.mapper.ProductMapper;
 import com.mall.core.mapper.SkuMapper;
+import com.mall.core.metric.OrderMetrics;
 import com.mall.core.model.dto.CreateDirectOrderDTO;
 import com.mall.core.model.dto.CreateOrderDTO;
 import com.mall.core.model.vo.OrderCreateVO;
@@ -59,6 +60,7 @@ public class OrderServiceImpl implements OrderService {
     private final SkuMapper skuMapper;
     private final AddressService addressService;
     private final OrderProperties orderProperties;
+    private final OrderMetrics orderMetrics;
 
     /** 客户端生成的幂等键最大长度，与 t_order.request_id 的列定义一致 */
     private static final int MAX_REQUEST_ID_LENGTH = 64;
@@ -176,6 +178,8 @@ public class OrderServiceImpl implements OrderService {
             }
             // 防超卖的关键：条件 UPDATE 原子锁库存，失败即回滚整单
             if (skuMapper.lockStock(sku.getId(), line.quantity()) == 0) {
+                // 计数器要在抛异常前打：异常会让事务回滚，但指标不该跟着消失
+                orderMetrics.stockShortage();
                 throw new BusinessException(ResultCode.STOCK_NOT_ENOUGH, "库存不足：" + p.getName());
             }
             BigDecimal lineAmount = sku.getPrice() == null ? BigDecimal.ZERO
@@ -210,6 +214,7 @@ public class OrderServiceImpl implements OrderService {
             item.setOrderNo(order.getOrderNo());
             orderItemMapper.insert(item);
         }
+        orderMetrics.orderCreated();
         return OrderCreateVO.from(order);
     }
 

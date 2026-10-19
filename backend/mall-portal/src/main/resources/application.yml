@@ -64,7 +64,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
 
 # ============================================================
 # 生产 profile：--spring.profiles.active=prod
@@ -88,4 +88,4 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,prometheus
