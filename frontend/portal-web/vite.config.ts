@@ -29,7 +29,14 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:8090',
-        changeOrigin: true
+        changeOrigin: true,
+        // 同 admin-web：去掉代理带过来的 Origin，让 dev 与生产（同源）行为一致，
+        // 也避免换个 dev 端口就被后端 CORS 白名单挡成 403。
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.removeHeader('origin')
+          })
+        }
       },
       // 商品演示图由后端当静态资源提供（backend/mall-core/.../static/img）
       '/img': {

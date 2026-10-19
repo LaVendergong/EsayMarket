@@ -102,6 +102,9 @@ D:\projects\mall\
 │   ├── idempotency-verify.ps1    下单幂等的真并发验证（22 项断言：同/异 requestId 并发、重试、畸形体）
 │   ├── timeout-job-verify.ps1    超时关单验证（18 项断言：单应用能关 + 两应用只关一次）
 │   ├── security-verify.ps1       生产加固验证（17 项断言：traceId / CORS 白名单 / 登录限流）
+│   ├── backup-db.ps1             数据库逻辑备份（mysqldump 一致性快照，保留最近 N 份）
+│   ├── restore-db.ps1            从备份恢复（默认恢复到临时库，覆盖 mall 必须 -Force）
+│   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -162,6 +165,10 @@ pnpm typecheck    # vue-tsc 类型检查（vite build 本身不做类型检查�
 - 后台账号 `malladmin / admin123456`（登录页已预填）；H5 没有预置账号，**先注册**即可。
 - 登录态放 localStorage（admin 用 `mall_admin_token`，H5 用 `mall_portal_token`），都是 hash 路由。
 - 两个 dev server 都只监听本机；生产部署 `pnpm build` 产物丢任意静态服务器即可（hash 路由，不用配 rewrite）。
+- **端口被别的项目占着时**：`node scripts\web-check.mjs` / `web-flow.mjs` 的地址可用环境变量覆盖
+  （`ADMIN_WEB_URL` / `PORTAL_WEB_URL`），例如本机 5173 曾被另一项目占用，就把我们的后台起在 5175
+  并 `$env:ADMIN_WEB_URL='http://localhost:5175'` 再跑脚本。dev 代理已经会去掉 `Origin`（见 §8 第 39 条），
+  所以换端口不需要动后端 CORS 白名单。
 - **UI 库是按需注册的**：两个 `src/main.ts` 里各有一份显式组件清单。新页面用到**新**组件时必须往清单里补一行，
   否则组件不注册（症状是页面少一块 + 控制台一条 `Failed to resolve component`）。`node scripts\web-check.mjs`
   的告警零容忍会抓住这类漏注册。
@@ -612,6 +619,24 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
     [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
     # $errors.Count 必须为 0
     ```
+39. **Vite dev 代理会把浏览器的 `Origin` 头原样转发给后端**：换个 dev 端口（例如 5175）就被后端 CORS
+    白名单挡成 **403**，而且前端只看到「请求失败」，非常像权限问题（实测排查了一轮）。
+    生产是同源（nginx 反代 `/api`），浏览器压根不发 `Origin`、不走 CORS —— 所以正确做法是让 dev 代理
+    **去掉这个头**（两个 `vite.config.ts` 的 `proxy.configure` 里 `proxyReq.removeHeader('origin')`），
+    这样也就不用为了换端口去改后端白名单。
+40. **`mysql.exe` / `mysqldump.exe` 的「Using a password on the command line」警告走 stderr**，
+    在 `$ErrorActionPreference = 'Stop'` 的脚本里会被当成**致命错误**直接中断（报 NativeCommandError）。
+    调用它们前后要临时把 EAP 设成 `Continue`（`e2e-lib.ps1` 的 `Invoke-Mysql` 就是这么做的）。
+41. **PowerShell 里给 mysql 导入文件，别用 cmd 的 `<` 重定向，也别走管道**：
+    - `cmd /c "... < file"`：引号在 PowerShell → cmd 传递过程中会被吃掉（实测报 `/c 不是内部或外部命令`）
+    - 管道：PowerShell 会按文本处理，编码/BOM 容易被打坏
+    正确做法是用 mysql 自己的 `source`：`mysql -uroot -p... db -e "source D:/path/file.sql"`（路径用正斜杠）。
+42. **断言「两边相等」时必须同时要求非空**：我写过一个 `SUM(stock)`，但 `t_product` 没有 `stock` 列 →
+    查询报错、函数返回空串，两边都是空串 → 判成「相等」**假通过**。
+    正确写法：`($x.Length -gt 0 -and $x -eq $y)`。
+43. **`e2e-lib.ps1` 要求调用方先定义 8 个变量**（`$root $portal $admin $mysql $java $outDir $reqFile $MysqlPassword`，
+    见它文件头）。漏一个就会报「& 后面的表达式无效」这类完全指不到根因的错——这轮踩了两次。
+    新写验证脚本时，把这段定义连同 dot-source 一起照抄。
 38. **等「页面出现某段文字」还不够，要等「你要点的那个操作所需的数据」就绪**（§8 第 23 条的变体）：
     结算页 `load()` 是**先取地址、再取购物车清单**，地址卡片一出现测试就去点「提交订单」，
     而此时 `items` 还是空的 → `submit()` 直接 return（只弹个 toast），后端根本没收到请求。
@@ -697,8 +722,58 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 
 > A4 用「超长值」而不是「换行注入」：curl 无法在 header 里发真实换行（会截断成 `abc`，
 > 而 `abc` 本身合法、被原样沿用是对的）。换行注入那条由 `TraceIdFilterTest` 直接单测覆盖。
+
+### 日志策略（为什么后端不自带文件滚动）
+
+后端**只往 stdout 打日志**（格式见 `backend/mall-core/src/main/resources/logback-spring.xml`，行内带 traceId）。
+目录与轮转交给运行环境：
+
+- **docker 部署**：`docker-compose.yml` 里每个服务都配了 `json-file` 的 `max-size=20m / max-file=5`。
+  docker 默认**不限制**日志，长期跑会把宿主磁盘吃满——这是「凌晨磁盘 100% 导致服务不可用」的最常见原因。
+- **裸机长跑**：把 stdout 重定向到文件后交给 `logrotate`（或 systemd-journald）。
+- **本地开发**：`run.bat` 每次启动都会截断 `logs\*.log`，不会累积。
+
+> 我原先加过一份自带 `RollingFileAppender`（单文件 50MB / 按天切 / gzip / 总量 1GB）。
+> 默认阈值下它工作正常（写出 15KB 无异常），但把阈值压到 2KB 强制触发滚动时，
+> **实时文件变成 0 字节且没有任何错误上报**（打开 logback 内部状态也没有 ERROR）。
+> 2KB 属于病态配置（同秒内反复滚动、归档名互相覆盖），可这恰恰说明我无法证明它在
+> 「第一次真正滚动」时是可靠的——**一个可能静默丢日志的日志出口比没有更危险**，所以不带上线。
+> 12-factor 的做法本来就是「只打 stdout，由平台负责轮转」，这里回到那条路上。
+
+### 数据库备份 / 恢复（`backup-restore-verify.ps1` 13/13）
+
+```bash
+# 备份（--single-transaction 一致性快照，不锁写入；保留最近 7 份）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\backup-db.ps1
+
+# 恢复到临时库（默认 mall_restore，绝不会碰 mall）
+powershell ... -File scripts\restore-db.ps1 -File tmp\backup\mall-YYYYMMDD-HHmmss.sql
+
+# 真的演练一遍：备份 -> 恢复 -> 逐表比对 -> 清理 -> 确认主库零漂移
+powershell ... -File scripts\backup-restore-verify.ps1
+```
+
+**没有恢复过的备份不算备份**，所以这个演练是必须的。最后一次（`tmp\backup\summary.txt`）：
+
+```
+[PASS] 1.2 dump contains schema (CREATE TABLE) :: 16.1 KB
+[PASS] 1.3 dump contains data (INSERT INTO)
+[PASS] 3.1 every table has the same row count :: t_order=2 t_order_item=2 t_product=6 t_sku=10 t_user=5 ...
+[PASS] 3.2 order rows/amount/maxId identical :: live=2|19997.00|105 restored=2|19997.00|105
+[PASS] 3.3 product rows/price/sales identical :: live=6|29294.00|503 restored=6|29294.00|503
+[PASS] 3.5 sku rows/stock/locked identical :: live=10|537|0 restored=10|537|0
+[PASS] 3.4 chinese text survived the round trip :: 男士休闲夹克
+[PASS] 4.1 scratch database dropped
+[PASS] 4.2 live database untouched by the rehearsal :: no drift
+```
+
+两个刻意的设计：`mysqldump` **不加 `--databases`**（这样 dump 里没有 `CREATE DATABASE`/`USE`，
+才能恢复到任意库名，演练才不需要动生产库）；`restore-db.ps1` 覆盖 `mall` 必须显式带 `-Force`。
 | 前端全局错误兜底 + UI 库按需引入 | ✅ | 见下方「P2 前端错误兜底与包体」；`web-check` 24/24 |
 | 生产加固（CORS 白名单 / 登录限流 / traceId / 接口版本） | ✅ | 见下方「P4 生产加固」；`security-verify.ps1` 17/17 |
+| 日志与磁盘（避免长期跑吃满磁盘） | ✅ | 只打 stdout + docker `json-file` 上限，见下方「日志策略」 |
+| 数据库备份 / 恢复 | ✅ | `scripts\backup-db.ps1` / `restore-db.ps1`，真演练 `backup-restore-verify.ps1` 13/13 |
+| 测试覆盖（H5 取消订单） | ✅ | `web-flow.mjs` 39/39（新增取消订单 + 释放库存断言） |
 
 ### P1 下单幂等（22/22）
 

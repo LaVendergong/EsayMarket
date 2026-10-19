@@ -36,7 +36,15 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:8081',
-        changeOrigin: true
+        changeOrigin: true,
+        // 走代理时浏览器会把 Origin 带成 dev server 的地址（换端口就变，例如 5175），
+        // 后端 CORS 白名单里没有它 -> 直接 403。生产是同源（nginx 反代 /api），
+        // 浏览器压根不发 Origin、不走 CORS，所以这里把头去掉，让 dev 行为和生产一致。
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.removeHeader('origin')
+          })
+        }
       },
       // 商品演示图由后端当静态资源提供（backend/mall-core/.../static/img）
       '/img': {

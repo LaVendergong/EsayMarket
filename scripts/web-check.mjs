@@ -17,8 +17,9 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { launch } from './cdp.mjs'
 
-const ADMIN_WEB = 'http://localhost:5173'
-const PORTAL_WEB = 'http://localhost:5174'
+// 端口可覆盖：本机 5173 有时被别的项目占着（见 docs §8），用 ADMIN_WEB_URL 指到我们的 dev server
+const ADMIN_WEB = process.env.ADMIN_WEB_URL || 'http://localhost:5173'
+const PORTAL_WEB = process.env.PORTAL_WEB_URL || 'http://localhost:5174'
 const ADMIN_API = 'http://localhost:8081'
 const PORTAL_API = 'http://localhost:8090'
 const OUT_DIR = 'D:/projects/mall/tmp/web'

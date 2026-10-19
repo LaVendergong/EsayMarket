@@ -48,10 +48,9 @@ mall:
       max-failures: ${MALL_LOGIN_MAX_FAILURES:5}
       lock-seconds: ${MALL_LOGIN_LOCK_SECONDS:300}
 
-logging:
-  # 日志带 traceId（TraceIdFilter 写入 MDC），非请求线程显示 "-"
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %5p [%X{traceId:--}] [%15.15t] %-40.40logger{39} : %m%n"
+# 日志只打 stdout，格式在 backend/mall-core/src/main/resources/logback-spring.xml 里；
+# 目录/轮转交给运行环境（docker 的 json-file 上限见 docker-compose.yml，裸机交给 logrotate）。
+# 自定义了 logback-spring.xml 之后，这里的 logging.pattern.* 不再生效，别再写回来。
 
 springdoc:
   api-docs:

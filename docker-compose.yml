@@ -18,6 +18,14 @@
 
 name: mall
 
+# 日志上限：docker 的 json-file 驱动**默认不限制**，长期跑会把宿主磁盘吃满（最常见的「半夜磁盘 100%」）。
+# 后端自己还有一份滚动文件（backend/mall-core/.../logback-spring.xml），这里是 docker 层的第二道保险。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   mysql:
     image: mysql:8.0
@@ -32,7 +40,7 @@ services:
       - "3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
-      # initdb 按文件名排序执行：V1__schema → V2 → V3(演示数据) → V4
+      # initdb 按文件名排序执行：V1__schema → V2 → V3(演示数据) → V4(索引) → V5(幂等键)
       - ./sql:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
@@ -41,6 +49,7 @@ services:
       retries: 30
       start_period: 30s
     restart: unless-stopped
+    logging: *default-logging
 
   mall-admin:
     build:
@@ -62,6 +71,7 @@ services:
       mysql:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
 
   mall-portal:
     build:
@@ -82,6 +92,7 @@ services:
       mysql:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
 
   admin-web:
     build:
@@ -92,6 +103,7 @@ services:
     depends_on:
       - mall-admin
     restart: unless-stopped
+    logging: *default-logging
 
   portal-web:
     build:
@@ -102,6 +114,7 @@ services:
     depends_on:
       - mall-portal
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   mysql-data:

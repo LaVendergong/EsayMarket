@@ -109,6 +109,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/idempotency-verify.p
 # 超时关单验证（18 项断言：单应用能关 + 两应用同跑只关一次；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/timeout-job-verify.ps1
 
+# 备份 / 恢复演练（13 项断言：备份→恢复到临时库→逐表比对→清理，不碰主库）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-restore-verify.ps1
+
 # 生产加固验证（17 项断言：traceId / CORS 白名单 / 登录失败限流；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/security-verify.ps1
 
@@ -121,7 +124,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p3-verify.ps1
 # 前端页面渲染检查（24 项断言 + 控制台告警零容忍；需要 Chrome + 前后端都已启动）
 node scripts/web-check.mjs
 
-# 前端全流程交互测试（35 项断言：真点按钮跑完整个购物闭环，含「立即购买」）
+# 前端全流程交互测试（39 项断言：真点按钮跑完整个购物闭环，含「立即购买」与「取消订单」）
 node scripts/web-flow.mjs
 ```
 
@@ -158,6 +161,10 @@ prod 下的行为差异：
 - 登录有**失败次数限流**：同一用户名窗口内失败 5 次锁 5 分钟，锁定期间连正确密码也拒
 - 每个响应都带 `X-Trace-Id`（16 位 hex），日志行里也有，排查时让用户把它给你即可
 - 业务接口统一在 **`/api/v1/**`** 下（旧的无版本路径已移除，会 404）
+- **日志只打 stdout**：docker 部署由 `docker-compose.yml` 里的 `json-file` 上限（`max-size=20m` / `max-file=5`）兜住；
+  裸机长跑请把 stdout 交给 `logrotate` 或 systemd-journald。后端**不自带**文件滚动（原因见 `docs/AI-HANDOFF.md`）
+- **备份**：`scripts/backup-db.ps1` 做一致性快照（保留最近 7 份）；`scripts/backup-restore-verify.ps1`
+  会真的备份→恢复到临时库→逐表比对→清理，用来证明「备份能恢复」。**没有恢复过的备份不算备份。**
 - 启动时执行 `ProductionConfigGuard` 自检：密钥若为空、是未解析的占位符、是开发默认值或长度不足，
   **应用直接启动失败**，不会带着弱密钥跑起来
 

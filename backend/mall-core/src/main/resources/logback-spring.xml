@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  日志配置（两个应用共用：放在 mall-core 里，Spring Boot 会在 classpath 上找到 logback-spring.xml）。
+
+  **只输出到 stdout**，目录/轮转交给运行环境：
+    - docker 部署：docker-compose.yml 里每个服务都配了 json-file 的 max-size=20m / max-file=5
+      （docker 默认**不限制**，长期跑会把宿主磁盘吃满）
+    - 裸机长跑：把 stdout 重定向到文件后交给 logrotate（或 systemd-journald）；
+      本地开发 run.bat 每次启动都会截断 logs\*.log，不会累积
+
+  为什么**不**自带 RollingFileAppender：
+  原先加过一份「单文件 50MB、按天切、gzip、总量 1GB」的文件 appender，默认阈值下工作正常，
+  但把阈值压到 2KB 强制触发滚动时，实时文件变成 0 字节且**没有任何错误上报**（logback 内部状态里也没有
+  ERROR）——虽然 2KB 属于病态配置（同秒内反复滚动、归档名互相覆盖），但这说明我无法证明它在
+  「第一次真正滚动」时是可靠的。一个可能静默丢日志的日志出口比没有更危险，所以不带上线。
+  （12-factor 的做法本来就是「只打 stdout，由平台负责轮转」。）
+
+  日志行里的 [xxxxxxxxxxxxxxxx] 是 traceId（由 TraceIdFilter 写入 MDC），非请求线程显示 [-]。
+-->
+<configuration>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %5p [%X{traceId:--}] [%15.15t] %-40.40logger{39} : %m%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>

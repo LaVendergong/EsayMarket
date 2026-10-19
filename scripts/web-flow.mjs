@@ -17,8 +17,9 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { launch } from './cdp.mjs'
 
 // ------------------------------------------------------------------ 配置
-const ADMIN_WEB = 'http://localhost:5173'
-const PORTAL_WEB = 'http://localhost:5174'
+// 端口可覆盖：本机 5173 有时被别的项目占着（见 docs §8），用 ADMIN_WEB_URL 指到我们的 dev server
+const ADMIN_WEB = process.env.ADMIN_WEB_URL || 'http://localhost:5173'
+const PORTAL_WEB = process.env.PORTAL_WEB_URL || 'http://localhost:5174'
 const ADMIN_API = 'http://localhost:8081'
 const PORTAL_API = 'http://localhost:8090'
 
@@ -378,6 +379,32 @@ try {
     '立即购买没有破坏购物车原有的勾选',
     cartAfter.length === 1 && cartAfter[0].checked === 0 && cartAfter[0].skuId === skuId,
     `size=${cartAfter.length} checked=${cartAfter[0]?.checked} skuId=${cartAfter[0]?.skuId}`
+  )
+
+  // ================================================================ H5：取消订单（释放锁定库存）
+  log('')
+  log('--- H5：取消待支付订单 ---')
+  // 上一段「立即购买」留下的就是待支付订单，正好用来测取消：
+  // 取消要过二次确认，成功后状态变已关闭，并且**释放**它锁定的库存
+  const lockBefore = sql(`SELECT IFNULL(locked_stock,0) FROM t_sku WHERE product_id = ${prodId};`)
+  await waitSel('.footer .van-button')
+  await clickText('.footer .van-button', '取消订单')
+  const cancelDialog = await waitFor(`!!document.querySelector('.van-dialog__confirm')`, 5000)
+  check('取消订单弹出二次确认', cancelDialog, `确认框出现=${cancelDialog}`)
+  await clickSelector('.van-dialog__confirm')
+  const closedOnH5 = await waitFor(pageHas('已关闭'), 8000)
+  const closedStatus = sql(`SELECT status FROM t_order WHERE id = ${directOrderId};`)
+  check(
+    '取消成功，订单状态=已关闭(4)',
+    closedOnH5 && closedStatus === '4',
+    `页面已关闭=${closedOnH5} db status=${closedStatus}（期望 4）`
+  )
+
+  const lockAfter = sql(`SELECT IFNULL(locked_stock,0) FROM t_sku WHERE product_id = ${prodId};`)
+  check(
+    '取消后释放锁定的库存（locked 减少 2）',
+    Number(lockBefore) - Number(lockAfter) === 2,
+    `locked ${lockBefore} -> ${lockAfter}（期望差 2）`
   )
 
   // ================================================================ 收尾核对
