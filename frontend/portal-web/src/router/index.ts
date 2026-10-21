@@ -85,6 +85,24 @@ const router = createRouter({
       meta: { title: '订单详情', auth: true }
     },
     {
+      path: '/after-sale',
+      name: 'afterSaleList',
+      component: () => import('@/views/AfterSaleListView.vue'),
+      meta: { title: '我的售后', auth: true }
+    },
+    {
+      path: '/after-sale/new',
+      name: 'afterSaleApply',
+      component: () => import('@/views/AfterSaleApplyView.vue'),
+      meta: { title: '申请售后', auth: true }
+    },
+    {
+      path: '/after-sale/:id',
+      name: 'afterSaleDetail',
+      component: () => import('@/views/AfterSaleDetailView.vue'),
+      meta: { title: '售后详情', auth: true }
+    },
+    {
       path: '/address',
       name: 'address',
       component: () => import('@/views/AddressListView.vue'),

@@ -142,11 +142,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p3-verify.ps1
 # 前端页面渲染检查（24 项断言 + 控制台告警零容忍；需要 Chrome + 前后端都已启动）
 node scripts/web-check.mjs
 
-# 前端全流程交互测试（46 项断言：真点按钮跑完整个购物闭环，含「立即购买」「取消订单」「待支付倒计时」「再次购买」「售罄置灰」）
+# 前端全流程交互测试（57 项断言：真点按钮跑完整个闭环，含「立即购买」「取消订单」「待支付倒计时」「再次购买」「售罄置灰」「申请售后→后台同意退款」）
 node scripts/web-flow.mjs
 
 # 管理后台 UI CRUD（16 项断言：分类增删改禁用 / 商品新增-下架-删除）
 node scripts/admin-crud-verify.mjs
+
+# 售后状态机（44 项断言：申请/撤销/拒绝/同意 + 库存语义 + 越权；会自己停/起后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/after-sale-verify.ps1
 ```
 
 前两个脚本会自己 stop → build → run → 跑断言 → 汇总，证据落在 `tmp/<阶段>/`。
@@ -192,6 +195,9 @@ prod 下的行为差异：
 - 业务接口统一在 **`/api/v1/**`** 下（旧的无版本路径已移除，会 404）
 - **日志只打 stdout**：docker 部署由 `docker-compose.yml` 里的 `json-file` 上限（`max-size=20m` / `max-file=5`）兜住；
   裸机长跑请把 stdout 交给 `logrotate` 或 systemd-journald。后端**不自带**文件滚动（原因见 `docs/AI-HANDOFF.md`）
+- **售后**：支持「仅退款」「退货退款」两种（**换货不做**，避免半成品）。状态机是
+  待商家处理 → 已退款 / 已拒绝 / 已撤销；同一订单同时只能有一个进行中的售后，商家同意才会退款并（退货退款时）恢复库存。
+  入口：订单详情、我的 → 我的售后；后台「售后处理」菜单。
 - **备份**：`scripts/backup-db.ps1` 做一致性快照（保留最近 7 份）；`scripts/backup-restore-verify.ps1`
   会真的备份→恢复到临时库→逐表比对→清理，用来证明「备份能恢复」。**没有恢复过的备份不算备份。**
 - **监控**：两个后端都暴露 `/actuator/prometheus`（JVM / 连接池 / HTTP 指标 + 两个业务计数器）。
@@ -204,7 +210,7 @@ prod 下的行为差异：
 > 这个自检是必需的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把解析不了的占位符
 > **原样保留而不是报错**，只靠 YAML 写 `${MALL_JWT_SECRET}` 拦不住（详见 `docs/AI-HANDOFF.md` §8 第 26 条）。
 
-CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V7、两个前端 typecheck+build。
+CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V8、两个前端 typecheck+build。
 
 ## 几个必须知道的坑
 

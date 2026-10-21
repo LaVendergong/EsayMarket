@@ -26,4 +26,13 @@ public interface SkuMapper extends BaseMapper<Sku> {
     @Update("UPDATE t_sku SET stock = stock - #{qty}, locked_stock = GREATEST(locked_stock - #{qty}, 0), " +
             "update_time = NOW() WHERE id = #{skuId} AND deleted = 0 AND stock >= #{qty}")
     int deductStock(@Param("skuId") Long skuId, @Param("qty") int qty);
+
+    /**
+     * 退货退款时把库存加回去（和 deductStock 对称）。
+     *
+     * <p>只在 {@code AfterSaleType.RETURN_REFUND} 上调：仅退款没有货退回仓库，
+     * 加库存会让账面库存虚高、进而超卖。
+     */
+    @Update("UPDATE t_sku SET stock = stock + #{qty}, update_time = NOW() WHERE id = #{skuId} AND deleted = 0")
+    int restoreStock(@Param("skuId") Long skuId, @Param("qty") int qty);
 }

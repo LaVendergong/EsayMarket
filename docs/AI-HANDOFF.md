@@ -113,6 +113,7 @@ D:\projects\mall\
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
 │   ├── metrics-verify.ps1        监控验证（16 项断言：prometheus 端点 + 业务计数器真的会动）
 │   ├── admin-crud-verify.mjs     后台分类/商品的 **UI** CRUD 验证（16 项断言）
+│   ├── after-sale-verify.ps1     售后状态机（44 项断言：申请/撤销/拒绝/同意 + 库存语义 + 越权）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -735,7 +736,16 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
     已完成的订单本来就该有「再次购买」，整页 `includes('再次购买')` 必然为真（踩过）。
 73. **注入登录态前先落在不发请求的页面**：直接 `goto('/')` 会先按默认路由发一次请求，
     而那时 localStorage 里可能还是**上一轮遗留的 access token**（只有 15 分钟，很容易过期）
-    → 冒一条 401，把「零控制台告警」的断言打红。先 `goto('/#/login')` 设好 token 再跳目标页。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+    → 冒一条 401，把「零控制台告警」的断言打红。先 `goto('/#/login')` 设好 token 再跳目标页。74. **售后/退款这类"只能发生一次"的操作，必须用「带状态条件的 UPDATE + 判断影响行数」**：
+    先 `selectById` 判断状态再 update，两个客服同时点「同意退款」就会退两次。
+    正确写法：`UPDATE t_after_sale SET status=1 WHERE id=? AND status=0`，影响 0 行就报 3004。
+75. **拒绝/撤销售后必须把订单退回"申请前的状态"**：如果只把售后单标记为拒绝，订单会永远卡在
+    「售后中」（用户既不能再申请、商家也没法发货）。所以 `t_after_sale` 要有 `order_status_before` 字段。
+76. **退款要不要恢复库存，取决于售后类型**：仅退款没有货退回仓库，加库存会让账面虚高 → 超卖；
+    只有退货退款才 `stock + N`。同理「申请时锁库存、支付时扣库存、取消时释放锁库存」三条链路别混着用。
+77. **PowerShell 捕获 `mysql.exe` 的中文输出会按控制台代码页（GBK）解码成乱码**，
+    拿它跟源码里的 UTF-8 中文比一定失败（但库里的值是对的）。要比中文就用 `HEX(列)` 比十六进制，
+    输出纯 ASCII，稳定。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -896,6 +906,82 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 售后：退款 / 退货退款（`after-sale-verify.ps1` 44/44 + `web-flow` 11 条 UI 断言）
+
+**改动前**：系统里**完全没有售后**。订单只有 待支付/已支付/已发货/已完成/已关闭，
+用户付了钱发现不想要，唯一出路是「不确认收货」——没有任何可走的流程。这是功能缺口，不是体验问题。
+
+#### 状态机（两套状态，必须一起看）
+
+售后单：
+
+```
+PENDING(0 待商家处理) ──商家同意──> APPROVED(1 已退款)      ← 终态
+        ├──商家拒绝──> REJECTED(2 商家已拒绝)               ← 终态
+        └──用户撤销──> CANCELED(3 用户已撤销)               ← 终态
+```
+
+订单：申请时 `已支付(1)/已发货(2)/已完成(3)` → **`售后中(5)`** → 同意则 **`已退款(6)`**，
+拒绝/撤销则**退回申请前的状态**（`t_after_sale.order_status_before`）。
+
+#### 只做两种售后类型（`换货` 明确不做）
+
+| 类型 | 含义 | 库存 |
+|---|---|---|
+| 仅退款 | 没收到货 / 不想要了，商品不寄回 | **不动** |
+| 退货退款 | 已收到货需寄回，商家收到后退款 | **恢复（stock + N）** |
+
+换货要再走一次发货流程，边界比退款复杂得多。**与其做个半成品让人误以为能用，不如不做**，
+在类型选择页和文档里都写清楚。
+
+#### 四条不变式（每条都有断言守着）
+
+1. 只有 已支付/已发货/已完成 能申请（待支付 → 3006，已退款 → 3006）
+2. **同一订单同时只能有一个进行中的售后** —— 申请时先把订单推进到「售后中」，
+   并发第二个申请影响 0 行 → 3005
+3. 售后单只有 `PENDING` 能被处理 —— 重复点「同意退款」返回 3004，**不会重复退款**
+4. 拒绝/撤销必须把订单**退回申请前的状态**，否则订单永远卡在「售后中」
+
+#### 验证
+
+`scripts/after-sale-verify.ps1`（**44/44**，真库真接口）：
+
+```
+[PASS] A1 applying on an unpaid order is rejected (3006)
+[PASS] B2 order moved to AFTER_SALE(5) :: status=5
+[PASS] B3 row: pending / refund-only / refund=200.00 / prevStatus=1 :: 0|1|200.00|1
+[PASS] B5 a second in-flight application is rejected (3006/3005)
+[PASS] B6 applying on someone else order is rejected (3001)
+[PASS] C3 order restored to PAID(1) :: status=1
+[PASS] C4 cancelling twice is rejected (3004)
+[PASS] D5 order restored to PAID(1) :: status=1
+[PASS] D6 reject remark is stored :: hex=E4B88D...
+[PASS] D7 rejecting twice is rejected (3004)
+[PASS] E5 refund-only does NOT restore stock :: stock 48 -> 48
+[PASS] E6 approving twice is rejected (3004, no double refund)
+[PASS] F3 return-refund restores stock (+2) :: stock 46 -> 48
+[PASS] G4 a normal user cannot read the admin after-sale list (403)
+```
+
+UI 侧接进 `web-flow`（41 → **57/57**），走的是真按钮：
+
+```
+[PASS] 订单详情出现「申请售后」入口
+[PASS] 选择「退货退款」类型 / 选择售后原因
+[PASS] 申请后订单状态变为「售后中」 :: db status=5
+[PASS] 后台售后列表出现待处理单并可点「同意退款」
+[PASS] 同意后售后单已退款 / 订单已退款(6) :: as=1 order=6
+[PASS] H5 售后详情显示「退款已完成」
+```
+
+#### 界面（这次重点解决"不明确"）
+
+- **入口三处**：订单详情底部按钮、订单详情顶部状态条、我的 → 我的售后
+- **申请页**：两种类型带一句话说明（谁需要寄回）、固定原因选项、退款金额直接显示在提交栏
+- **详情页**：顶部大字状态 + 一句话解释，下面是**时间线**（提交申请 → 商家处理 → 退款完成），
+  商家备注直接展示
+- **后台**：售后处理菜单 → 按状态筛选 → 同意（二次确认，提示"退款金额/是否恢复库存"）/ 拒绝（必填理由）
 
 ### 购物流程手感优化（`web-flow` 41→46）
 
@@ -1224,7 +1310,8 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 令牌生命周期（短 access + 可吊销 refresh） | ✅ | 见下方「令牌生命周期」；`token-lifecycle-verify.ps1` **26/26** |
 | HTTPS 传输加密 | ⚠️ | 只给了模板 `deploy/nginx-tls.conf.example`，本机没有 nginx/证书无法验证；但**部署测试已确认 prod 的 Secure Cookie 与安全响应头在真实容器里生效** |
 | 本地部署测试（Docker） | ✅ | 见下方「本地部署测试」；`deploy-verify.sh` **36/36** + `deploy-browser-check.mjs` **8/8** |
-| 购物流程手感优化 | ✅ | 见下方「购物流程手感优化」；`web-flow` **46/46** |
+| 购物流程手感优化 | ✅ | 见下方「购物流程手感优化」；`web-flow` **57/57** |
+| 售后（退款 / 退货退款） | ✅ | 见下方「售后」；`after-sale-verify.ps1` **44/44** + UI 11 条 |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）

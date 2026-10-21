@@ -35,7 +35,11 @@ public enum ResultCode {
     ADDRESS_REQUIRED(2010, "请先设置收货地址"),
 
     ORDER_NOT_FOUND(3001, "订单不存在"),
-    ORDER_STATUS_ERROR(3002, "当前订单状态不允许该操作");
+    ORDER_STATUS_ERROR(3002, "当前订单状态不允许该操作"),
+    AFTER_SALE_NOT_FOUND(3003, "售后单不存在"),
+    AFTER_SALE_STATUS_ERROR(3004, "当前售后状态不允许该操作"),
+    AFTER_SALE_EXISTS(3005, "该订单已有进行中的售后，请等商家处理"),
+    AFTER_SALE_NOT_ALLOWED(3006, "当前订单状态不支持申请售后（需已支付/已发货/已完成）");
 
     private final int code;
     private final String message;

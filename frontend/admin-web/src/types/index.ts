@@ -138,3 +138,22 @@ export const ORDER_STATUS: { value: number; label: string; tag: 'info' | 'warnin
   { value: 3, label: '已完成', tag: 'success' },
   { value: 4, label: '已关闭', tag: 'danger' }
 ]
+
+/** 售后单（后台处理用） */
+export interface AfterSaleVO {
+  id: number
+  afterSaleNo: string
+  orderId: number
+  orderNo: string
+  type: number
+  typeText: string
+  status: number
+  statusText: string
+  reason: string
+  description?: string
+  refundAmount: number
+  applyTime?: string
+  handleTime?: string
+  handleRemark?: string
+  items?: OrderItemVO[]
+}

@@ -470,13 +470,117 @@ try {
   )
   sql('UPDATE t_sku SET stock = ' + skuStock + ' WHERE product_id = ' + prodId + ';')
 
+  // ================================================================ H5：申请售后 -> 后台同意退款
+  log('')
+  log('--- H5：申请售后（退货退款）---')
+  // 上一步「确认收货」后订单是已完成(3)，正好符合申请条件
+  await goto(PORTAL_WEB + '/?r=30#/order/' + orderId, 3000)
+  const applyEntry = await waitFor('document.body.innerText.includes("申请售后")', 8000)
+  check('订单详情出现「申请售后」入口', applyEntry, 'hash=' + (await evalJs('location.hash')))
+  await clickText('.footer .van-button', '申请售后')
+  const onApply = await waitFor('location.hash.startsWith("#/after-sale/new")', 6000)
+  check('进入申请售后页', onApply, 'hash=' + (await evalJs('location.hash')))
+
+  // 选「退货退款」（第二个 radio 行）
+  const pickedType = await evalJs(`(() => {
+    const cells = [...document.querySelectorAll('.van-cell')];
+    const cell = cells.find(c => (c.innerText || '').includes('退货退款'));
+    if (!cell) return 'no-cell';
+    cell.click();
+    return 'ok';
+  })()`)
+  check('选择「退货退款」类型', pickedType === 'ok', 'clicked=' + pickedType)
+
+  const pickedReason = await evalJs(`(() => {
+    const cells = [...document.querySelectorAll('.van-cell')];
+    const cell = cells.find(c => (c.innerText || '').trim() === '商品质量问题');
+    if (!cell) return 'no-cell';
+    cell.click();
+    return 'ok';
+  })()`)
+  check('选择售后原因', pickedReason === 'ok', 'clicked=' + pickedReason)
+
+  await clickText('.van-submit-bar__button', '提交申请')
+  const onAsDetail = await waitFor('location.hash.startsWith("#/after-sale/") && !location.hash.includes("new")', 8000)
+  const asHash = await evalJs('location.hash')
+  const afterSaleId = Number(String(asHash).split('/').pop())
+  check('提交后进入售后详情页', onAsDetail && afterSaleId > 0, 'hash=' + asHash)
+
+  const asDetailText = await innerText()
+  check(
+    '售后详情显示「商家正在处理」',
+    asDetailText.includes('商家正在处理') && asDetailText.includes('退货退款'),
+    'contains=' + asDetailText.includes('商家正在处理')
+  )
+  check(
+    '申请后订单状态变为「售后中」',
+    sql('SELECT status FROM t_order WHERE id = ' + orderId + ';') === '5',
+    'db status=' + sql('SELECT status FROM t_order WHERE id = ' + orderId + ';')
+  )
+
+  log('')
+  log('--- 后台：同意退款 ---')
+  await goto(ADMIN_WEB + '/?r=31#/after-sale', 3500)
+  const asRowClicked = await evalJs(`(() => {
+    const rows = [...document.querySelectorAll('.el-table__row')];
+    const row = rows.find(r => (r.innerText || '').includes(${JSON.stringify('AS')}));
+    if (!rows.length) return 'no-rows';
+    const target = rows[0];
+    const btn = [...target.querySelectorAll('button')].find(b => (b.innerText || '').includes('同意退款'));
+    if (!btn) return 'no-btn';
+    btn.click();
+    return 'ok';
+  })()`)
+  check('后台售后列表出现待处理单并可点「同意退款」', asRowClicked === 'ok', 'clicked=' + asRowClicked)
+
+  await waitFor('!!document.querySelector(".el-message-box")', 5000)
+  await evalJs(`(() => {
+    const input = document.querySelector('.el-message-box__input input');
+    if (input) {
+      input.value = '同意退货退款';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return true;
+  })()`)
+  const confirmed = await evalJs(`(() => {
+    const btn = [...document.querySelectorAll('.el-message-box__btns button')].find(b => (b.innerText || '').includes('确认退款'));
+    if (!btn) return 'no-btn';
+    btn.click();
+    return 'ok';
+  })()`)
+  check('确认退款对话框可提交', confirmed === 'ok', 'clicked=' + confirmed)
+  await new Promise((r) => setTimeout(r, 1500))
+
+  check(
+    '同意后售后单已退款 / 订单已退款(6)',
+    sql('SELECT status FROM t_after_sale WHERE id = ' + afterSaleId + ';') === '1' &&
+      sql('SELECT status FROM t_order WHERE id = ' + orderId + ';') === '6',
+    'as=' + sql('SELECT status FROM t_after_sale WHERE id = ' + afterSaleId + ';') +
+      ' order=' + sql('SELECT status FROM t_order WHERE id = ' + orderId + ';')
+  )
+
+  // 回到 H5 看用户视角，确认状态是同步的（不是只有后台知道）
+  await goto(PORTAL_WEB + '/?r=32#/after-sale/' + afterSaleId, 3000)
+  const finalAsText = await innerText()
+  check(
+    'H5 售后详情显示「退款已完成」',
+    finalAsText.includes('退款已完成'),
+    'contains=' + finalAsText.includes('退款已完成')
+  )
+
   // ================================================================ 收尾核对
   log('')
   log('--- 收尾核对 ---')
   const finalOrder = await api('GET', `${PORTAL_API}/api/v1/portal/order/${orderId}`, { token: (await api('POST', `${PORTAL_API}/api/v1/portal/auth/login`, { body: { username: BUYER, password: BUYER_PWD } })).data?.token })
+  // 流程最后一步是「申请售后 -> 商家同意退款」，所以订单终态是「已退款(6)」而不是「已完成(3)」。
+  // 收货快照（receiver）仍然要是下单时的那个 —— 退款不改历史收货信息。
   check(
-    '订单最终状态与收货快照正确',
-    finalOrder.code === 200 && finalOrder.data.status === 3 && finalOrder.data.statusText === '已完成' && finalOrder.data.items.length === 1 && finalOrder.data.receiver === '流程测试收货人',
+    '订单最终状态（已退款）与收货快照正确',
+    finalOrder.code === 200 &&
+      finalOrder.data.status === 6 &&
+      finalOrder.data.statusText === '已退款' &&
+      finalOrder.data.items.length === 1 &&
+      finalOrder.data.receiver === '流程测试收货人',
     `code=${finalOrder.code} statusText=${finalOrder.data?.statusText} items=${finalOrder.data?.items?.length} receiver=${finalOrder.data?.receiver}`
   )
 } finally {

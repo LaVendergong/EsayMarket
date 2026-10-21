@@ -18,7 +18,11 @@ public enum OrderStatus {
     PAID(1, "已支付"),
     SHIPPED(2, "已发货"),
     FINISHED(3, "已完成"),
-    CLOSED(4, "已关闭");
+    CLOSED(4, "已关闭"),
+    /** 有进行中的售后单：申请时从 已支付/已发货/已完成 流转进来，商家拒绝或用户撤销时退回原状态 */
+    AFTER_SALE(5, "售后中"),
+    /** 售后已同意并退款 */
+    REFUNDED(6, "已退款");
 
     private final int code;
     private final String text;

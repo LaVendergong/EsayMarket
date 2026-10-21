@@ -1,5 +1,5 @@
 import { http } from './http'
-import type {
+import type { AfterSaleVO, 
   CategoryDTO,
   CategoryVO,
   LoginVO,
@@ -44,4 +44,15 @@ export const orderApi = {
   detail: (id: number) => http.get<never, OrderVO>(`/admin/order/${id}`),
   ship: (id: number) => http.post<never, void>(`/admin/order/${id}/ship`),
   close: (id: number) => http.post<never, void>(`/admin/order/${id}/close`)
+}
+
+/** 售后：列表 / 详情 / 同意退款 / 拒绝 */
+export const afterSaleApi = {
+  page: (params: { pageNum: number; pageSize: number; status?: number }) =>
+    http.get<never, PageResult<AfterSaleVO>>('/admin/after-sale/page', { params }),
+  detail: (id: number) => http.get<never, AfterSaleVO>(`/admin/after-sale/${id}`),
+  approve: (id: number, remark?: string) =>
+    http.post<never, void>(`/admin/after-sale/${id}/approve`, { remark }),
+  reject: (id: number, remark?: string) =>
+    http.post<never, void>(`/admin/after-sale/${id}/reject`, { remark })
 }

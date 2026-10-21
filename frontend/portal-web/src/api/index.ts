@@ -1,5 +1,5 @@
 import { http } from './http'
-import type {
+import type { AfterSaleVO, 
   AddressDTO,
   AddressVO,
   CartVO,
@@ -83,4 +83,18 @@ export const orderApi = {
   pay: (id: number) => http.post<never, void>(`/portal/order/${id}/pay`),
   cancel: (id: number) => http.post<never, void>(`/portal/order/${id}/cancel`),
   confirm: (id: number) => http.post<never, void>(`/portal/order/${id}/confirm`)
+}
+
+/** 售后：申请 / 我的售后 / 详情 / 撤销 */
+export const afterSaleApi = {
+  apply: (data: { orderId: number; type: number; reason: string; description?: string }) =>
+    http.post<never, number>('/portal/after-sale', data),
+  page: (pageNum = 1, pageSize = 10) =>
+    http.get<never, { total: number; list: AfterSaleVO[] }>('/portal/after-sale/page', {
+      params: { pageNum, pageSize }
+    }),
+  detail: (id: number) => http.get<never, AfterSaleVO>(`/portal/after-sale/${id}`),
+  /** 订单详情页用它判断「能不能申请 / 现在走到哪一步」，没有售后时返回 null */
+  byOrder: (orderId: number) => http.get<never, AfterSaleVO | null>(`/portal/after-sale/by-order/${orderId}`),
+  cancel: (id: number) => http.post<never, void>(`/portal/after-sale/${id}/cancel`)
 }
