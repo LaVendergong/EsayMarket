@@ -129,6 +129,20 @@ abody=$(json "$ADMIN_WEB/")
 check "E admin static page served" "$(printf '%s' "$abody" | grep -q 'id="app"' && echo 1 || echo 0)" "bytes=${#abody}"
 
 echo
+echo
+echo "== H) Chinese text is intact (initdb charset) =="
+# 这一组是回归「中文被二次编码」那个坑：initdb 的 mysql 客户端若以 latin1 建连接，
+# 种子里的 UTF-8 中文会以「UTF-8 字节被当 latin1 再编码」的形式写进库（å°ç±³），
+# 应用侧怎么改都救不回来，只能重建库。
+prod_json=$(json "$PORTAL_API/api/v1/portal/product/page?pageNum=1&pageSize=5")
+check "H product api returns real CJK text" "$(printf '%s' "$prod_json" | grep -qP '[\x{4e00}-\x{9fa5}]' && echo 1 || echo 0)" ''
+check "H product api has no latin1 mojibake chars" "$(printf '%s' "$prod_json" | grep -qP '[\x{00C0}-\x{00FF}]' && echo 0 || echo 1)" ''
+# 双重编码在 HEX 里一定出现 C3A5/C3A6/C3A7 这类前缀（正常 CJK 是 E4..E9 开头），可以直接查库
+moji_rows=$(sql "SELECT (SELECT COUNT(*) FROM t_product WHERE HEX(name) LIKE '%C3A5%' OR HEX(name) LIKE '%C3A6%' OR HEX(name) LIKE '%C3A7%') + (SELECT COUNT(*) FROM t_category WHERE HEX(name) LIKE '%C3A5%' OR HEX(name) LIKE '%C3A6%' OR HEX(name) LIKE '%C3A7%');")
+check "H no double-encoded rows in the database" "$([ "${moji_rows:-1}" = "0" ] && echo 1 || echo 0)" "badRows=${moji_rows:-unknown}"
+cli_charset=$(sql "SHOW GLOBAL VARIABLES LIKE 'character_set_client';" | awk '{print $2}' | tr -d '\r')
+check "H server overrides client charset (utf8mb4)" "$([ "$cli_charset" = "utf8mb4" ] && echo 1 || echo 0)" "character_set_client=$cli_charset"
+
 echo "== F) end-to-end order on the deployed stack =="
 AT="Authorization: Bearer $tok"
 addr=$(curl -s -m 15 -X POST "$PORTAL_API/api/v1/portal/address" -H "$AT" -H 'Content-Type: application/json' \

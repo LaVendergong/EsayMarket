@@ -6,6 +6,10 @@
 --   docker-entrypoint-initdb.d 是按**文件名顺序**执行 *.sql 的，而 ASCII 里大写 V(86) < 小写 s(115)，
 --   叫 schema.sql 会被排到 V2/V3/V4 之后执行，建表顺序就反了。统一 V<N>__ 前缀后顺序天然正确。
 -- ============================================================
+-- 显式声明本文件是 UTF-8：initdb 用的 mysql 客户端可能默认 latin1，
+-- 那样中文会被二次编码存进库（表面看是乱码，实际是数据写坏了）。见 docs §8 第 68 条。
+SET NAMES utf8mb4;
+
 CREATE DATABASE IF NOT EXISTS mall DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 USE mall;
 

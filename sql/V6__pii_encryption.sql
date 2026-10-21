@@ -9,6 +9,10 @@
 -- 存量明文由应用启动时的 com.mall.core.crypto.PiiEncryptionMigrator 逐行加密（幂等）。
 -- 用法：mysql -uroot -p*** --default-character-set=utf8mb4 -e "source D:/projects/mall/sql/V6__pii_encryption.sql"
 -- ============================================================================
+-- 显式声明本文件是 UTF-8：initdb 用的 mysql 客户端可能默认 latin1，
+-- 那样中文会被二次编码存进库（表面看是乱码，实际是数据写坏了）。见 docs §8 第 68 条。
+SET NAMES utf8mb4;
+
 USE mall;
 
 ALTER TABLE t_user

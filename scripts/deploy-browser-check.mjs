@@ -66,6 +66,12 @@ check('4 protected api works from the browser (Secure cookie was accepted)', Num
 const homeText = await innerText()
 check('5 home page renders after login', homeText.includes('首页') || homeText.includes('我的'), `len=${homeText.length}`)
 
+// 用户报过「首页中文乱码」：数据库被二次编码时，页面会渲染出 å°ç±³ 这类西欧字符。
+// 这里直接看渲染后的文本：必须有真正的 CJK，且不能出现 Latin-1 补充区字符（U+00C0–U+00FF）。
+const cjk = /[\u4e00-\u9fa5]/.test(homeText)
+const mojibake = /[\u00c0-\u00ff]/.test(homeText)
+check('5b rendered page shows real Chinese and no mojibake', cjk && !mojibake, `cjk=${cjk} mojibake=${mojibake}`)
+
 const uniq = [...new Set(browser.problems)]
 console.log(`--- console problems: ${uniq.length} ---`)
 for (const p of uniq.slice(0, 10)) console.log('   ' + p)

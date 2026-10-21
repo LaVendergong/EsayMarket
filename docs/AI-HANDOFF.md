@@ -725,6 +725,12 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
     用 `docker.m.daocloud.io` 前缀拉取再 `docker tag` 成标准名字，compose 文件不用改。
 67. **不要在 `/mnt/d`（drvfs）里构建镜像**：npm/maven 在 9p 文件系统上容易出权限/符号链接问题，
     先把仓库 `tar` 到 WSL 原生目录（排除 node_modules/target/.git）再 build，快且稳。
+68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+    是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
+    于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
+    判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
+    修法：① 每个 SQL 文件开头 `SET NAMES utf8mb4;` ② mysqld 加 `--character-set-client-handshake=FALSE`。
+    顺手把「接口返回 CJK + 库里无双重编码」做成部署测试断言，避免下次重建库又踩。
 38. **等「页面出现某段文字」还不够，要等「你要点的那个操作所需的数据」就绪**（§8 第 23 条的变体）：
     结算页 `load()` 是**先取地址、再取购物车清单**，地址卡片一出现测试就去点「提交订单」，
     而此时 `items` 还是空的 → `submit()` 直接 return（只弹个 toast），后端根本没收到请求。
@@ -925,6 +931,37 @@ PORTAL_WEB=http://localhost:15174 PORTAL_API=http://localhost:18090 \
 | F 端到端 | 注册→地址→下单在容器里跑通；订单快照在容器 DB 里是 `enc:v1:<kid>:` 密文；详情接口回明文；清理干净 |
 | 浏览器 | UI 登录成功、localStorage 无 token、JS 看不到登录 Cookie、**受保护接口能通**、控制台零报错 |
 
+**这次部署测试抓到的第二个 bug：中文全变乱码（`小米 14` 显示成 `å°ç±³ 14`）**
+
+不是前端的问题，是**数据在入库时就被写坏了**。证据：
+
+```
+utf8mb4 客户端读：  name=å°ç±³ 14   HEX=C3A5C2B0C28F...   LENGTH=15（"小米 14" 正常应是 9）
+latin1  客户端读：  name=小米 14      ← 能读出来，说明是「UTF-8 字节被当 latin1 又编码了一次」
+SHOW VARIABLES:    character_set_client / connection / results = latin1   ← 根因
+```
+
+根因：compose 只给了 `--character-set-server=utf8mb4`（这只设服务端默认），
+而 **initdb 用的 `mysql` 客户端是以 latin1 建连接的** —— 它把 UTF-8 文件里的中文按 latin1
+发过去，服务端再按 utf8mb4 存 → 双重编码。应用侧怎么改都救不回来，只能重建库。
+
+修法（两条一起）：
+
+1. 每个 `sql/V*.sql` 开头加 `SET NAMES utf8mb4;`（显式声明"这些字节是 UTF-8"，与客户端默认无关）
+2. mysqld 启动参数加 `--character-set-client-handshake=FALSE`（忽略客户端声明的字符集，
+   统一按服务端 utf8mb4 处理连接）
+
+**这类问题会不会再犯？** 已经把「中文没坏」做成部署测试的固定断言（H 组 4 条）：
+
+```
+[PASS] H product api returns real CJK text
+[PASS] H product api has no latin1 mojibake chars
+[PASS] H no double-encoded rows in the database :: badRows=0
+[PASS] H server overrides client charset (utf8mb4) :: character_set_client=utf8mb4
+```
+
+浏览器冒烟里也加了一条看**渲染后文本**的断言（必须有 CJK、且不能出现 U+00C0–U+00FF）——
+因为用户看到的就是渲染结果，接口正常但页面乱码也算失败。
 > 最后那条「受保护接口能通」是这次部署测试最有价值的一条：prod 的 Cookie 带 `Secure`，
 > 本地没有 HTTPS，只有浏览器把 `localhost` 当安全上下文时才会发送它。curl 测不出这件事。
 

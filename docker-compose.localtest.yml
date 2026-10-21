@@ -29,6 +29,10 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_general_ci
+      # 忽略客户端声明的字符集，统一按服务端默认（utf8mb4）处理连接。
+      # 不加这个的话，initdb 用的 mysql 客户端会以 latin1 建连接，UTF-8 的种子数据被二次编码进库
+      # （表面是乱码，实际是数据写坏了，且应用侧怎么改都救不回来）。见 docs §8 第 68 条。
+      - --character-set-client-handshake=FALSE
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: mall

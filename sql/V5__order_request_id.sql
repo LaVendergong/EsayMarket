@@ -17,6 +17,10 @@
 --
 -- 用法：mysql -uroot -p*** --default-character-set=utf8mb4 -e "source D:/projects/mall/sql/V5__order_request_id.sql"
 -- ============================================================
+-- 显式声明本文件是 UTF-8：initdb 用的 mysql 客户端可能默认 latin1，
+-- 那样中文会被二次编码存进库（表面看是乱码，实际是数据写坏了）。见 docs §8 第 68 条。
+SET NAMES utf8mb4;
+
 USE mall;
 
 SET @exists := (SELECT COUNT(*) FROM information_schema.columns
