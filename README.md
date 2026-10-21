@@ -127,6 +127,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/auth-cookie-verify.p
 # 密钥轮换演练（28 项断言：换密钥→旧数据仍可读→重加密→去掉旧密钥仍可读→还原；会重启 5 次后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/crypto-rotate-verify.ps1
 
+# 令牌生命周期（26 项断言：access 5 秒真过期 / refresh 轮换 / 重放失败 / 登出吊销；会自己停/起后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/token-lifecycle-verify.ps1
+
 # 商品域端到端（36 项断言）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1
 
@@ -177,6 +180,7 @@ prod 下的行为差异：
 - CORS 变成**显式白名单**（原来是通配来源 + 允许携带凭证，等于任意站点可带用户身份调后端）
 - **敏感数据在库里是加密的**：手机号、收货人、详细地址（含订单快照）都用 **AES-256-GCM** 字段级加密，enc:v1: 前缀标识密文；存量明文会在应用启动时自动补加密（幂等、双实例并发安全）。密码是 BCrypt，任何接口都不返回。scripts/security-data-verify.ps1 会用 34 项断言验证这件事（含「同一个手机号两行密文必须不同」）
 - **登录态在 HttpOnly Cookie 里**（`SameSite=Lax` + 前端 `X-CSRF-Token` 双提交校验），**localStorage 不存 token** —— XSS 读不到凭证；脚本/服务端仍可用 `Authorization: Bearer`，且不受 CSRF 影响
+- **令牌分两级**：access 只活 15 分钟（无状态、不可吊销，所以越短越安全）；refresh 7 天、**只存哈希**、**用一次即换新**、可吊销。access 过期由前端自动用 refresh 换新（单飞，避免并发刷新互相踩），用户无感
 - **PII 加密密钥支持轮换**：密文带 keyId（`enc:v1:<keyId>:<payload>`），轮换时把新密钥放进 `MALL_CRYPTO_SECRET`、旧密钥放进 `MALL_CRYPTO_PREVIOUS_SECRETS`（仅解密），再用 `MALL_CRYPTO_RE_ENCRYPT_ON_STARTUP=true` 重启一次把数据迁到新密钥，最后清掉旧密钥。`scripts/crypto-rotate-verify.ps1` 会把这条链路真跑一遍
 - **密码策略**：8-64 位且必须同时含字母和数字；超过 72 字节（BCrypt 的有效长度）直接拒绝
 - **传输加密**：容器只监听 80，HTTPS 需要在前面加一层 TLS 终止，模板见 deploy/nginx-tls.conf.example（含 HSTS / CSP / 安全响应头，**需在目标机验证**）
@@ -197,7 +201,7 @@ prod 下的行为差异：
 > 这个自检是必需的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把解析不了的占位符
 > **原样保留而不是报错**，只靠 YAML 写 `${MALL_JWT_SECRET}` 拦不住（详见 `docs/AI-HANDOFF.md` §8 第 26 条）。
 
-CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V6、两个前端 typecheck+build。
+CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V7、两个前端 typecheck+build。
 
 ## 几个必须知道的坑
 

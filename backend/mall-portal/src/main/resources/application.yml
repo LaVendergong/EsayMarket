@@ -29,7 +29,10 @@ mall:
   jwt:
     # 必须与 mall-admin 的 MALL_JWT_SECRET 一致，否则前台签发的 token 后台认不了
     secret: ${MALL_JWT_SECRET:mall-dev-only-INSECURE-secret-0123456789abcdef}
-    expire-millis: ${MALL_JWT_EXPIRE_MILLIS:604800000}
+    # access token 只活 15 分钟（无状态、不可吊销 -> 越短越安全）
+    access-expire-millis: ${MALL_JWT_ACCESS_EXPIRE_MILLIS:900000}
+    # refresh token 7 天，存库、可吊销、用一次即换新
+    refresh-expire-millis: ${MALL_JWT_REFRESH_EXPIRE_MILLIS:604800000}
   order:
     # 未支付订单有效期（分钟），与 mall-admin 保持一致
     expire-minutes: ${MALL_ORDER_EXPIRE_MINUTES:30}

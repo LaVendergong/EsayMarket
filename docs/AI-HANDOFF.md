@@ -105,6 +105,7 @@ D:\projects\mall\
 │   ├── security-data-verify.ps1  敏感数据安全验证（34 项断言：密码策略 / PII 静态加密 / 往返 / 日志 / 指标）
 │   ├── auth-cookie-verify.ps1    登录态验证（27 项断言：HttpOnly / SameSite / CSRF 双提交 / 退出清理 / 两应用隔离）
 │   ├── crypto-rotate-verify.ps1  密钥轮换演练（28 项断言：换密钥→旧数据仍可读→重加密→去掉旧密钥仍可读→还原）
+│   ├── token-lifecycle-verify.ps1 令牌生命周期（26 项断言：access 真过期 / refresh 轮换 / 重放失败 / 登出吊销）
 │   ├── backup-db.ps1             数据库逻辑备份（mysqldump 一致性快照，保留最近 N 份）
 │   ├── restore-db.ps1            从备份恢复（默认恢复到临时库，覆盖 mall 必须 -Force）
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
@@ -219,6 +220,8 @@ CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在�
 | `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致** | `mall-dev-only-INSECURE-…`（明确标了不安全） |
 | `MALL_CRYPTO_SECRET` | PII 字段加密主密钥（AES-256-GCM）。**两个后端必须一致、且必须与 `MALL_JWT_SECRET` 不同**；⚠️ 上线后不可随意更换 | `mall-dev-only-INSECURE-crypto-secret-…`（prod 自检会拦） |
 | `MALL_COOKIE_SECURE` | 登录态 Cookie 是否只在 HTTPS 下发送。**prod 必须 true**（自检会拦 false），dev 必须 false（http 下 Secure Cookie 不会下发） | false |
+| `MALL_JWT_ACCESS_EXPIRE_MILLIS` | access token（JWT）有效期。默认 15 分钟；无状态不可吊销，所以别调大 | 900000 |
+| `MALL_JWT_REFRESH_EXPIRE_MILLIS` | refresh token 有效期。默认 7 天，可吊销 | 604800000 |
 | `MALL_CRYPTO_PREVIOUS_SECRETS` | 轮换过渡期**仅用于解密**的历史密钥（逗号分隔）。重加密完成后必须清空 | 空 |
 | `MALL_CRYPTO_RE_ENCRYPT_ON_STARTUP` | 一次性开关：启动时把仍在历史密钥下的数据重加密成当前密钥 | false |
 | `MALL_DB_URL` / `MALL_DB_USERNAME` / `MALL_DB_PASSWORD` | 数据库连接 | localhost / root / `521131` |
@@ -697,6 +700,16 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 59. **写演练脚本时，别假设"现有数据一定在某个 keyId 下"**：上一版代码写的密文可能连 keyId 都没有。
     我第一次写轮换演练就栽在这：断言"数据在旧 kid 下"恒为 0。
     正确判据是「存在加密的 PII」+「轮换后数据**还未**迁到新 kid」。
+60. **Cookie 名要显式配置，别靠字符串拼接推导**：我一开始把 refresh 名写成
+    `tokenCookieName() + "_refresh"`，实际得到 `mall_portal_token_refresh`，
+    而演练脚本按 `mall_portal_refresh` 找 —— 应用本身工作正常，但 4 条断言全红、排查半天。
+61. **前端刷新必须「单飞」**：refresh 是**用一次即作废**的，多个并发请求同时 401 时如果各刷一次，
+    第二个必然失败并把用户踢下线。做法是共享同一个 Promise（`refreshing`）。
+62. **`LambdaUpdateWrapper.set(...)` 会立即解析列名**（需要 MyBatis-Plus 的 TableInfo 缓存），
+    纯单元测试里没有缓存，会抛 `can not find lambda cache for this entity`。
+    `.eq()` 是延迟解析的，所以「patch 实体 + 条件 wrapper」的写法在生产与单测里都能跑。
+63. **刷新失败时后端返回 HTTP 200 + `code=401`**（本项目统一约定），前端不能只按 HTTP 状态判断，
+    要看业务码；反过来，`/auth/**` 必须排除在「401 自动刷新」逻辑之外，否则会自己刷自己。
 38. **等「页面出现某段文字」还不够，要等「你要点的那个操作所需的数据」就绪**（§8 第 23 条的变体）：
     结算页 `load()` 是**先取地址、再取购物车清单**，地址卡片一出现测试就去点「提交订单」，
     而此时 `items` 还是空的 → `submit()` 直接 return（只弹个 toast），后端根本没收到请求。
@@ -852,6 +865,43 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 令牌生命周期：15 分钟 access + 可吊销 refresh（`token-lifecycle-verify.ps1` 26/26）
+
+**问题**：access token 有效期 7 天且**无法吊销** —— 登出只清了浏览器 Cookie，已经泄露出去的 token
+在到期前一直能用。（上一轮审计里"仍未做"的最后一条。）
+
+**做法**：
+
+- access（JWT）**15 分钟**；refresh **7 天**，存 `t_refresh_token`，**只存 SHA-256 哈希**
+  （它等价于一个长期口令，明文入库等于把用户会话直接交出去）。
+- refresh **用一次即换新**（轮换）：`UPDATE ... WHERE token_hash=? AND revoked=0 AND expires_at>now`
+  看影响行数，并发重放只有一个能成功。
+- 用 refresh 换 access 时**重新检查账号状态** —— 被禁用的账号不能靠 refresh 一直续命。
+- 登出 = 吊销库里那一行 + 清三个 Cookie。
+- 前端：401 → **单飞**刷新（多个并发 401 只刷一次）→ 重试原请求一次（`__retried` 标记防死循环）。
+
+**验证**（26 项，`tmp\token-lifecycle\summary.txt`）—— 把 access TTL 临时调成 **5 秒**来真验过期，而不是"看着像会过期"：
+
+```
+[PASS] A2 access JWT lifetime is ~5000ms (claims exp-iat) :: exp-iat=5s
+[PASS] A3 access cookie carries the short Max-Age :: maxAge=5
+[PASS] A4 refresh cookie lives much longer (7 days) :: maxAge=604800
+[PASS] B1 expired access is rejected with 401 :: http=401
+[PASS] C1 refresh call succeeds :: code=200
+[PASS] C4 replaying the OLD refresh fails (one-time use) :: code=401
+[PASS] D3 every refresh row for this user is revoked in the DB :: rows=2 active=0
+[PASS] D4 refresh after logout is rejected :: code=401
+[PASS] E1 Bearer-only request works (scripts unchanged) :: http=200
+[PASS] F2 default access TTL is 15 minutes again :: exp-iat=900s
+```
+
+**仍未做（如实列）**：
+
+1. access token 本身仍**不可吊销**：15 分钟内泄露的 token 照样能用。要彻底解决得引入 jti 黑名单
+   （每个请求查一次缓存），成本明显上升，暂不做。
+2. `revokeAll(userId)` 已经实现但**没暴露成"踢下线"接口**（改密码时应当调用它）。
+3. refresh 没有设备/会话列表，用户看不到"我在哪些设备登录过"。
 
 ### 密钥轮换（`crypto-rotate-verify.ps1` 28/28）
 
@@ -1015,6 +1065,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 敏感数据加密（密码 / PII / 日志 / 密钥） | ✅ | 见下方「敏感数据安全审计」；`security-data-verify.ps1` **34/34** |
 | 登录态改 HttpOnly Cookie + CSRF | ✅ | 见下方「登录态迁移」；`auth-cookie-verify.ps1` **27/27** |
 | PII 加密密钥轮换（双密钥 + 重加密） | ✅ | 见下方「密钥轮换」；`crypto-rotate-verify.ps1` **28/28** |
+| 令牌生命周期（短 access + 可吊销 refresh） | ✅ | 见下方「令牌生命周期」；`token-lifecycle-verify.ps1` **26/26** |
 | HTTPS 传输加密 | ⚠️ | 只给了模板 `deploy/nginx-tls.conf.example`，**本机无法验证**（无 nginx/证书），上线前必须在目标机跑 |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 

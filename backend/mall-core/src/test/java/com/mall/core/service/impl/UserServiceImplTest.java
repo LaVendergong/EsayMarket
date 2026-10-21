@@ -103,7 +103,7 @@ class UserServiceImplTest {
         when(userMapper.selectOne(any())).thenReturn(activeUser());
         when(passwordEncoder.matches("good", "hashed")).thenReturn(true);
         when(jwtProperties.getSecret()).thenReturn("unit-test-secret-0123456789abcdef0123456789abcdef");
-        when(jwtProperties.getExpireMillis()).thenReturn(60_000L);
+        when(jwtProperties.getAccessExpireMillis()).thenReturn(900_000L);
 
         LoginVO vo = service.login(dto("tester", "good"));
 

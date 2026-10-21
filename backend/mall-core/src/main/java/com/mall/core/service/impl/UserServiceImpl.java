@@ -84,9 +84,31 @@ public class UserServiceImpl implements UserService {
         Map<String, Object> claims = new HashMap<>();
         claims.put("role", user.getRole() == null ? 0 : user.getRole());
         claims.put("username", user.getUsername());
-        String token = JwtUtil.create(jwtProperties.getSecret(), jwtProperties.getExpireMillis(),
+        String token = JwtUtil.create(jwtProperties.getSecret(), jwtProperties.getAccessExpireMillis(),
                 claims, String.valueOf(user.getId()));
 
+        return toLoginVO(user, token);
+    }
+
+    @Override
+    public LoginVO refreshLogin(Long userId) {
+        // 刷新时也要确认账号还存在且没被禁用 —— 否则一个被禁用的账号靠 refresh 能一直续命
+        User user = userMapper.selectById(userId);
+        if (user == null) {
+            throw new BusinessException(ResultCode.USER_NOT_FOUND);
+        }
+        if (user.getStatus() != null && user.getStatus() == 0) {
+            throw new BusinessException(ResultCode.ACCOUNT_DISABLED);
+        }
+        Map<String, Object> claims = new HashMap<>();
+        claims.put("role", user.getRole() == null ? 0 : user.getRole());
+        claims.put("username", user.getUsername());
+        String token = JwtUtil.create(jwtProperties.getSecret(), jwtProperties.getAccessExpireMillis(),
+                claims, String.valueOf(user.getId()));
+        return toLoginVO(user, token);
+    }
+
+    private LoginVO toLoginVO(User user, String token) {
         LoginVO vo = new LoginVO();
         vo.setToken(token);
         vo.setUserId(user.getId());

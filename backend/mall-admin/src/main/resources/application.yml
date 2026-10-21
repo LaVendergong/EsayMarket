@@ -29,7 +29,10 @@ mall:
   jwt:
     # 开发默认值明确标了 INSECURE；生产走 prod profile 强制注入真实随机值
     secret: ${MALL_JWT_SECRET:mall-dev-only-INSECURE-secret-0123456789abcdef}
-    expire-millis: ${MALL_JWT_EXPIRE_MILLIS:604800000}
+    # access token 只活 15 分钟（无状态、不可吊销 -> 越短越安全）
+    access-expire-millis: ${MALL_JWT_ACCESS_EXPIRE_MILLIS:900000}
+    # refresh token 7 天，存库、可吊销、用一次即换新
+    refresh-expire-millis: ${MALL_JWT_REFRESH_EXPIRE_MILLIS:604800000}
   order:
     # 未支付订单有效期（分钟）：下单时写入 t_order.expire_time
     expire-minutes: ${MALL_ORDER_EXPIRE_MINUTES:30}
