@@ -1,6 +1,6 @@
 # Mall 商城一键起：MySQL + 两个后端 + 两个前端
 #
-#   cp .env.example .env      # 填好 MYSQL_ROOT_PASSWORD 与 MALL_JWT_SECRET（两个必填）
+#   cp .env.example .env      # 填好 MYSQL_ROOT_PASSWORD / MALL_JWT_SECRET / MALL_CRYPTO_SECRET（三个必填）
 #   docker compose up -d --build
 #   docker compose down       # 停止（保留数据）
 #   docker compose down -v    # 停止并删库（重建时会重新执行 sql/）
@@ -63,6 +63,8 @@ services:
       MALL_DB_USERNAME: root
       MALL_DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MALL_JWT_SECRET: ${MALL_JWT_SECRET:?set MALL_JWT_SECRET in .env (see .env.example)}
+      # PII 字段加密主密钥；必须与 JWT 密钥不同，且上线后不可随意更换
+      MALL_CRYPTO_SECRET: ${MALL_CRYPTO_SECRET:?set MALL_CRYPTO_SECRET in .env (see .env.example)}
       # 超时关单定时任务只在 admin 开，避免两个应用重复扫同一批订单
       MALL_ORDER_TIMEOUT_JOB_ENABLED: "true"
     ports:
@@ -86,6 +88,8 @@ services:
       MALL_DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       # 必须与 mall-admin 完全一致，否则前台签发的 token 后台认不了
       MALL_JWT_SECRET: ${MALL_JWT_SECRET:?set MALL_JWT_SECRET in .env (see .env.example)}
+      # PII 字段加密主密钥；必须与 JWT 密钥不同，且上线后不可随意更换
+      MALL_CRYPTO_SECRET: ${MALL_CRYPTO_SECRET:?set MALL_CRYPTO_SECRET in .env (see .env.example)}
     ports:
       - "8090:8090"
     depends_on:

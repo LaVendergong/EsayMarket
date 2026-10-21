@@ -25,6 +25,8 @@ public class ProductionConfigGuard {
 
     /** 与 application.yml 里的开发默认值保持一致；出现在 prod 里就说明没注入真实值 */
     static final String DEV_DEFAULT_JWT_SECRET = "mall-dev-only-INSECURE-secret-0123456789abcdef";
+    /** 与两个 application.yml 里 mall.crypto.secret 的默认值保持一致 */
+    static final String DEV_DEFAULT_CRYPTO_SECRET = "mall-dev-only-INSECURE-crypto-secret-0123456789abcdef";
     /** HS256 要求密钥至少 256 bit */
     static final int MIN_SECRET_LENGTH = 32;
 
@@ -46,8 +48,9 @@ public class ProductionConfigGuard {
         // 否则本地想按 prod 方式自测都会被挡住
         requireReal("spring.datasource.password", null);
         checkCorsOrigins();
+        checkCryptoSecret();
 
-        log.info("[prod 启动自检] 通过：JWT 密钥与数据库口令均已从环境变量注入");
+        log.info("[prod 启动自检] 通过：JWT 密钥、数据库口令、PII 加密密钥均已从环境变量注入");
     }
 
     /**
@@ -66,6 +69,26 @@ public class ProductionConfigGuard {
                 throw new IllegalStateException("[prod 启动自检失败] mall.cors.allowed-origins 不能包含 *"
                         + "（本项目开启 allowCredentials，通配来源等于允许任意站点携带用户凭证调用）");
             }
+        }
+    }
+
+    /**
+     * prod 下 PII 字段加密密钥必须真的注入过。
+     *
+     * <p>用开发默认密钥上线，等于库里所有手机号/收货地址都拿一个公开在仓库里的密钥加密 ——
+     * 比明文好不了多少（拿到库的人同时也能拿到仓库）。
+     */
+    private void checkCryptoSecret() {
+        String secret = requireReal("mall.crypto.secret", DEV_DEFAULT_CRYPTO_SECRET);
+        if (secret.length() < MIN_SECRET_LENGTH) {
+            throw new IllegalStateException(String.format(
+                    "[prod 启动自检失败] mall.crypto.secret 长度只有 %d，至少需要 %d（建议 32+）",
+                    secret.length(), MIN_SECRET_LENGTH));
+        }
+        if (secret.equals(env.getProperty("mall.jwt.secret"))) {
+            // 密钥分离：签名密钥和加密密钥不能是同一把
+            throw new IllegalStateException("[prod 启动自检失败] mall.crypto.secret 不能与 mall.jwt.secret 相同"
+                    + "（签名密钥泄露时不该连带导致库里 PII 全部可解）");
         }
     }
 

@@ -166,7 +166,7 @@ try {
   log('--- H5：注册 ---')
   await goto(`${PORTAL_WEB}/#/register`, 2000)
   await setInput('input[placeholder="4-32 位"]', BUYER)
-  await setInput('input[placeholder="6-64 位"]', BUYER_PWD)
+  await setInput('input[placeholder="8-64 位，含字母和数字"]', BUYER_PWD)
   const okFill = await evalJs(`[...document.querySelectorAll('input')].filter((i) => i.value).length >= 2`)
   check('注册表单可填写', okFill === true, `已填 ${await evalJs(`[...document.querySelectorAll('input')].filter((i) => i.value).length`)} 个输入框`)
 

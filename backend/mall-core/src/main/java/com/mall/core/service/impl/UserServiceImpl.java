@@ -20,6 +20,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,9 @@ import java.util.Map;
 @Service
 @RequiredArgsConstructor
 public class UserServiceImpl implements UserService {
+
+    /** BCrypt 的有效长度上限（字节）：超过部分会被静默截断 */
+    private static final int BCRYPT_MAX_BYTES = 72;
 
     private final UserMapper userMapper;
     private final PasswordEncoder passwordEncoder;
@@ -39,6 +43,13 @@ public class UserServiceImpl implements UserService {
         if (exists != null && exists > 0) {
             throw new BusinessException(ResultCode.USERNAME_EXISTS);
         }
+        // BCrypt 只使用密码的前 72 字节，超出的部分会被静默丢弃 —— 也就是「设了长密码但后半段无效」。
+        // 与其让用户以为更安全，不如直接拒绝（中文按 UTF-8 3 字节算，64 个汉字就超了）。
+        if (dto.getPassword().getBytes(StandardCharsets.UTF_8).length > BCRYPT_MAX_BYTES) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED,
+                    "密码过长（最多 " + BCRYPT_MAX_BYTES + " 字节，一个汉字算 3 字节）");
+        }
+
         User user = new User();
         user.setUsername(dto.getUsername());
         user.setPassword(passwordEncoder.encode(dto.getPassword()));

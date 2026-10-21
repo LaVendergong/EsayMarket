@@ -1,0 +1,99 @@
+# ============================================================================
+# HTTPS 终止配置模板（**示例，需按实际域名/证书路径调整后再启用**）
+#
+# 为什么必须有这一层：目前两个前端容器只监听 80，登录密码、JWT、
+# 手机号/收货地址**全部以明文经过网络**。数据库里字段加密做得再好，
+# 也挡不住链路上被截获 —— 传输加密是这一块的前提，不是可选项。
+#
+# ⚠️ 这份模板在本机**没有真实验证过**（本机没有 nginx、也没有证书），
+#    上线前请在目标机器上：
+#      1) 换成真实证书（推荐 certbot / 云厂商证书）
+#      2) nginx -t 语法检查通过
+#      3) 用 curl -I https://<域名> 确认 HSTS 生效
+#      4) 用 https://www.ssllabs.com/ssltest/ 扫一遍（目标 A 及以上）
+#
+# 用法：把本文件内容并入你的 nginx 主配置（http{} 块内），两个域名各一份，
+#       或只保留一个 server 块并把 server_name 换成你的域名。
+# ============================================================================
+
+# ---------- 80 端口只做跳转，不承载任何明文业务 ----------
+server {
+    listen 80;
+    server_name mall.example.com admin.example.com;
+
+    # 保留 ACME 验证路径，否则 certbot 续期会失败
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# ---------- H5 商城 ----------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name mall.example.com;
+
+    ssl_certificate     /etc/nginx/certs/mall.example.com.fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/mall.example.com.key;
+
+    # 只留 TLS 1.2/1.3（1.0/1.1 已被各大浏览器弃用，且存在已知攻击面）
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # HSTS：强制浏览器后续只用 HTTPS。
+    # ⚠️ 先在测试域名上小流量验证，再上 includeSubDomains 与 preload；
+    #    一旦被浏览器记住，回退成 HTTP 会让用户在有效期内完全访问不了。
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # 其余安全头
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "same-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+
+    # CSP：本项目 token 存在 localStorage，所以重点是把 XSS 的入口收窄。
+    #   script-src 'self'        只允许自己的脚本（Vant/Element Plus 的样式是内联的，故 style 放开）
+    #   connect-src 'self'       只允许同源接口
+    #   frame-ancestors 'none'   配合 X-Frame-Options 防点击劫持
+    # ⚠️ 首次启用建议先加 `Content-Security-Policy-Report-Only` 观察一周报告，确认无误再改成强制。
+    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 1024;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://mall-portal:8090;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;   # 让后端知道原始请求是 https
+    }
+
+    location /img/ {
+        proxy_pass http://mall-portal:8090;
+        proxy_set_header Host $host;
+    }
+}
+
+# ---------- 管理后台（把某一种服务再复制一份，改 server_name / root / 上游端口即可）----------
+# server {
+#     listen 443 ssl;
+#     http2 on;
+#     server_name admin.example.com;
+#     ... 同上，proxy_pass 指向 mall-admin:8081
+# }

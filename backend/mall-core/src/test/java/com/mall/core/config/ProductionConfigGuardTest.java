@@ -26,15 +26,22 @@ class ProductionConfigGuardTest {
 
     private static final String GOOD_SECRET = "unit-test-secret-0123456789abcdef0123456789abcdef";
     private static final String GOOD_PASSWORD = "a-real-db-password";
+    /** PII 加密密钥（必须与 JWT 密钥不同） */
+    private static final String GOOD_CRYPTO = "unit-test-crypto-0123456789abcdef0123456789abcdef";
 
     private Environment env(boolean prod, String secret, String password) {
-        return env(prod, secret, password, null);
+        return env(prod, secret, password, null, GOOD_CRYPTO);
     }
 
     private Environment env(boolean prod, String secret, String password, String corsOrigins) {
+        return env(prod, secret, password, corsOrigins, GOOD_CRYPTO);
+    }
+
+    private Environment env(boolean prod, String secret, String password, String corsOrigins, String crypto) {
         Map<String, String> props = new HashMap<>();
         props.put("mall.jwt.secret", secret);
         props.put("spring.datasource.password", password);
+        props.put("mall.crypto.secret", crypto);
         if (corsOrigins != null) {
             props.put("mall.cors.allowed-origins", corsOrigins);
         }
@@ -42,6 +49,46 @@ class ProductionConfigGuardTest {
         when(env.acceptsProfiles(any(Profiles.class))).thenReturn(prod);
         when(env.getProperty(anyString())).thenAnswer(inv -> props.get(inv.getArgument(0, String.class)));
         return env;
+    }
+
+    // ---------------------------------------------------------------- PII 加密密钥
+
+    @Test
+    void prod_withMissingCryptoSecret_isRejected() {
+        // 空串代表「环境变量没注入」
+        Environment env = env(true, GOOD_SECRET, GOOD_PASSWORD, null, "");
+
+        assertThatThrownBy(() -> new ProductionConfigGuard(env).check())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mall.crypto.secret");
+    }
+
+    @Test
+    void prod_withDevDefaultCryptoSecret_isRejected() {
+        Environment env = env(true, GOOD_SECRET, GOOD_PASSWORD, null, ProductionConfigGuard.DEV_DEFAULT_CRYPTO_SECRET);
+
+        assertThatThrownBy(() -> new ProductionConfigGuard(env).check())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mall.crypto.secret");
+    }
+
+    @Test
+    void prod_withShortCryptoSecret_isRejected() {
+        Environment env = env(true, GOOD_SECRET, GOOD_PASSWORD, null, "x".repeat(16));
+
+        assertThatThrownBy(() -> new ProductionConfigGuard(env).check())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mall.crypto.secret");
+    }
+
+    @Test
+    void prod_withCryptoSecretSameAsJwtSecret_isRejected() {
+        // 密钥分离：同一把密钥既签名又加密，一旦泄露两个能力一起丢
+        Environment env = env(true, GOOD_SECRET, GOOD_PASSWORD, null, GOOD_SECRET);
+
+        assertThatThrownBy(() -> new ProductionConfigGuard(env).check())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("不能与 mall.jwt.secret 相同");
     }
 
     @Test

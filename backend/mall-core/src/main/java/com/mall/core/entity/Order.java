@@ -1,16 +1,20 @@
 package com.mall.core.entity;
 
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.mall.core.base.BaseEntity;
+import com.mall.core.crypto.EncryptedStringTypeHandler;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
+import lombok.ToString;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
-@TableName("t_order")
+// autoResultMap 必开，否则查询结果不会被 typeHandler 解密（见 User 上的说明）
+@TableName(value = "t_order", autoResultMap = true)
 public class Order extends BaseEntity {
 
     private String orderNo;
@@ -27,10 +31,19 @@ public class Order extends BaseEntity {
     /** 见 com.mall.core.enums.OrderStatus */
     private Integer status;
 
+    /** PII：收货人快照（订单落库时从地址复制，之后地址改了也不影响历史订单） */
+    @TableField(typeHandler = EncryptedStringTypeHandler.class)
+    @ToString.Exclude
     private String receiver;
 
+    /** PII：联系电话快照 */
+    @TableField(typeHandler = EncryptedStringTypeHandler.class)
+    @ToString.Exclude
     private String receiverPhone;
 
+    /** PII：完整地址快照（省市区 + 门牌拼起来的，整体加密） */
+    @TableField(typeHandler = EncryptedStringTypeHandler.class)
+    @ToString.Exclude
     private String receiverAddr;
 
     private LocalDateTime payTime;

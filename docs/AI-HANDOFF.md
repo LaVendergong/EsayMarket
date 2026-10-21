@@ -102,6 +102,7 @@ D:\projects\mall\
 │   ├── idempotency-verify.ps1    下单幂等的真并发验证（22 项断言：同/异 requestId 并发、重试、畸形体）
 │   ├── timeout-job-verify.ps1    超时关单验证（18 项断言：单应用能关 + 两应用只关一次）
 │   ├── security-verify.ps1       生产加固验证（17 项断言：traceId / CORS 白名单 / 登录限流）
+│   ├── security-data-verify.ps1  敏感数据安全验证（34 项断言：密码策略 / PII 静态加密 / 往返 / 日志 / 指标）
 │   ├── backup-db.ps1             数据库逻辑备份（mysqldump 一致性快照，保留最近 N 份）
 │   ├── restore-db.ps1            从备份恢复（默认恢复到临时库，覆盖 mall 必须 -Force）
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
@@ -214,6 +215,7 @@ CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在�
 | 环境变量 | 说明 | 开发默认值 |
 |---|---|---|
 | `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致** | `mall-dev-only-INSECURE-…`（明确标了不安全） |
+| `MALL_CRYPTO_SECRET` | PII 字段加密主密钥（AES-256-GCM）。**两个后端必须一致、且必须与 `MALL_JWT_SECRET` 不同**；⚠️ 上线后不可随意更换 | `mall-dev-only-INSECURE-crypto-secret-…`（prod 自检会拦） |
 | `MALL_DB_URL` / `MALL_DB_USERNAME` / `MALL_DB_PASSWORD` | 数据库连接 | localhost / root / `521131` |
 | `MALL_ORDER_EXPIRE_MINUTES` | 未支付订单有效期 | 30 |
 | `MALL_ORDER_TIMEOUT_JOB_ENABLED` / `_INTERVAL_MILLIS` | 超时关单任务开关与间隔 | **两个应用都是 true**；10 秒 |
@@ -652,6 +654,21 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
     永远匹配不上（症状：指标明明在 `/actuator/prometheus` 里，脚本取到的却是 -1）。另外计数器名字带 `_total` 后缀。
 46. **想制造「库存不足」别用「加购一个超大数量」**：`CartService.add` 在**加购阶段**就会校验可售库存并返回 2003，
     订单根本到不了锁库存那一步（第一版这么写，断言直接失败）。正确做法是**正常加购，再把 SKU 总库存改成 0**。
+47. **字段加密的实体必须 `@TableName(value = "...", autoResultMap = true)`**：只加
+    `@TableField(typeHandler = EncryptedStringTypeHandler.class)` 时，**写入**会加密、**查询**却不会解密
+    （MyBatis-Plus 只有开了 `autoResultMap` 才把 typeHandler 放进结果映射）。症状是「写进去密文、读出来还是密文」。
+48. **BCrypt 只使用密码的前 72 字节**，超出部分被静默丢弃（"设了长密码但后半段无效"）。要在注册时显式拒绝：
+    中文按 UTF-8 是 3 字节/字，64 个汉字就超了。
+49. **字段加密的升级顺序不能反**：必须先跑加宽列的迁移（`sql/V6__pii_encryption.sql`）再启动应用，
+    否则写密文直接 `data too long`。另外迁移用的裸 SQL mapper **必须放在 `com.mall.core.mapper`**，
+    因为 `MybatisPlusConfig` 上是 `@MapperScan("com.mall.core.mapper")`，放别的包启动时注入失败。
+50. **断言「有没有泄露 PII」，正则要带边界**：
+    - 手机号写 `1[3-9]\d{9}` 会把 Prometheus 里的科学计数法数值（`1.18883110912E11`）当成手机号**误报**，
+      应写成 `(?<![\d.])1[3-9]\d{9}(?![\d.])`
+    - 判断「日志里有没有密文」不能只搜 `enc:v1:`，那会命中启动日志里那句「密文前缀 enc:v1:」的说明；
+      要匹配 `enc:v1:[A-Za-z0-9_-]{16,}`（前缀 + 真正的载荷）
+51. **本项目的接口约定是「HTTP 200 + 业务码」**：弱密码被拒时 http 仍是 200、`body.code=400`。
+    断言别写 `http -ne 200`（踩过一次，4 条断言全"假失败"，实际策略是生效的）。要看 `Code($resp)`。
 38. **等「页面出现某段文字」还不够，要等「你要点的那个操作所需的数据」就绪**（§8 第 23 条的变体）：
     结算页 `load()` 是**先取地址、再取购物车清单**，地址卡片一出现测试就去点「提交订单」，
     而此时 `items` 还是空的 → `submit()` 直接 return（只弹个 toast），后端根本没收到请求。
@@ -755,6 +772,59 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 > 「第一次真正滚动」时是可靠的——**一个可能静默丢日志的日志出口比没有更危险**，所以不带上线。
 > 12-factor 的做法本来就是「只打 stdout，由平台负责轮转」，这里回到那条路上。
 
+### 敏感数据安全审计（`security-data-verify.ps1` 34/34）
+
+**审计方法**：不看"有没有写加密代码"，而是追每一条敏感数据的**完整链路** —— 存储 / 传输 / 序列化 / 日志 / 备份 / 前端。
+
+| 数据 | 审计结论（改动前） | 现在 |
+|---|---|---|
+| 登录密码 | ✅ 已是 BCrypt（strength 10），任何接口都不返回、日志里也没有 | 补了**强度策略**（8-64 位、必须字母+数字）、**72 字节上限**、`@JsonIgnore` + `@ToString.Exclude` |
+| 手机号 / 收货人 / 详细地址 | ❌ **全库明文**（`t_user.phone`、`t_address.receiver/phone/detail`、`t_order` 三列快照） | ✅ **AES-256-GCM 字段级加密**（见下） |
+| JWT | ✅ HS256，密钥走环境变量，prod 自检拒绝开发默认值 | 补**密钥分离**：`mall.crypto.secret` 不得等于 `mall.jwt.secret` |
+| 日志 | ✅ 扫过：无手机号、无密码哈希、无 token；但有一条 Spring 自动生成的默认密码 | ✅ 已消除（排除 `UserDetailsServiceAutoConfiguration`） |
+| 备份文件 | ❌ 原来**没有备份** | ✅ 有备份；且因为列级加密，dump 里的 PII 已是密文（密码哈希仍是哈希） |
+| 传输 | ❌ **全程明文 HTTP**（密码、JWT、手机号裸奔） | ⚠️ 只给了模板 `deploy/nginx-tls.conf.example`（TLS1.2/1.3 + HSTS + CSP + 安全头）。**本机没有 nginx 和证书，无法验证 —— 这一项必须在目标机完成** |
+| 前端 | ✅ 无 `console.log`；token 存 localStorage（XSS 面，靠 CSP 收窄） | CSP 模板已给（先 Report-Only 观察再强制） |
+
+#### PII 字段级加密怎么做的
+
+- `com.mall.core.crypto.AesGcmCipher`：AES-256-GCM（**AEAD**，改密文会解密失败而不是解出错数据；ECB 还会让相同明文得到相同密文，手机号这种低基数字段一眼能看出重复）。密钥用 `SHA-256(mall.crypto.secret)` 派生，任意长度口令都能用。
+- 存储格式 `enc:v1:<base64url(iv ‖ 密文 ‖ tag)>`。**带前缀是刻意的**：读时靠前缀区分「已加密」与「历史明文」，于是上线不需要停机一次性迁移。
+- `EncryptedStringTypeHandler` + 实体上的 `@TableField(typeHandler = ...)`：读写自动加解密，业务代码零改动。
+- ⚠️ **实体类必须 `@TableName(value = "...", autoResultMap = true)`**，否则查询不走 typeHandler —— 写进去是密文、读出来还是密文（§8 第 45 条）。
+- 存量明文：`PiiEncryptionMigrator`（`ApplicationRunner`）启动时逐行加密，每条 `UPDATE` 带 `AND <列> = 旧值` 乐观条件，两个应用同时启动也只成功一次（实测 admin 迁了 11 个值、portal 迁了 7 个，**没有重复加密**）。
+- 列宽：密文比明文长得多，`sql/V6__pii_encryption.sql` 先把 `phone`→128、`receiver`→256、`detail`→1024、`receiver_addr`→2048 加宽（幂等）。**升级顺序：先跑 V6，再启动应用**，否则写密文会 `data too long`。
+- 代价（已知且可接受）：加密后**不能再按这些字段做等值/模糊查询**。本项目正好没有（`UserService.page` 只 `like(username)`）；将来要按手机号查，必须加一列 HMAC「盲索引」，不能直接 `WHERE phone = ?`。
+
+#### 验证（34 项，`tmp\security-data\summary.txt`）
+
+```
+[PASS] A1 6-digit all-numeric password rejected :: code=400 msg=密码需同时包含字母和数字
+[PASS] A4 password over the 72-byte BCrypt limit rejected :: code=400
+[PASS] A6 password stored as BCrypt hash :: prefix=$2a$10$
+[PASS] A9 user info response carries no password field/hash
+[PASS] B1 every t_address PII value is ciphertext :: rows=4 plaintextValues=0
+[PASS] B2 every t_order PII value is ciphertext :: rows=2 plaintextValues=0
+[PASS] B4 known seed PII is no longer readable from columns :: hits=0
+[PASS] C2 stored value is ciphertext (enc:v1: prefix) :: stored=enc:v1:|enc:v1:|enc:v1:
+[PASS] C3 API returns decrypted plaintext :: phoneVisible=True
+[PASS] C6 order snapshot stored as ciphertext
+[PASS] C7 order detail decrypts receiver/phone/address
+[PASS] C8 same phone in two rows yields different ciphertext (random IV, not ECB) :: same=False
+[PASS] D1 no plaintext phone number in logs        [PASS] D2 no BCrypt hash in logs
+[PASS] D3 no JWT/Bearer token in logs              [PASS] D4 no spring generated default password in logs
+[PASS] D5 no ciphertext dumped into logs           [PASS] E2 prometheus leaks no phone / no ciphertext
+```
+
+`C8` 是这套设计的关键证据：**同一个手机号插到两行，密文必须不同**。如果用 ECB 或固定 IV，两行密文会完全一样，等于没加密（攻击者能看出"这两个用户同一个号"）。
+
+#### 仍未做的（如实列出）
+
+1. **传输加密**要在目标机落地（模板已给，未验证）。
+2. **token 存 localStorage** + 7 天有效期 + **无吊销机制**：XSS 拿到 token 就能用到过期。缓解是 CSP；根治要么迁 httpOnly Cookie + CSRF token，要么加 jti 黑名单。
+3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
+4. **密钥轮换**没做双密钥流程：直接改 `mall.crypto.secret` 会导致旧密文全部解不开（代码会报错而不是给脏数据）。
+
 ### 监控（Prometheus，`metrics-verify.ps1` 16/16）
 
 只有 `/actuator/health` 时，出问题只能看到「进程还活着」，看不到「业务健不健康」。现在两个后端都暴露
@@ -831,6 +901,8 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 数据库备份 / 恢复 | ✅ | `scripts\backup-db.ps1` / `restore-db.ps1`，真演练 `backup-restore-verify.ps1` 13/13 |
 | 测试覆盖（H5 取消订单） | ✅ | `web-flow.mjs` 39/39（新增取消订单 + 释放库存断言） |
 | 监控指标（Prometheus） | ✅ | `/actuator/prometheus` + 两个业务计数器，见下方「监控」；`metrics-verify.ps1` 16/16 |
+| 敏感数据加密（密码 / PII / 日志 / 密钥） | ✅ | 见下方「敏感数据安全审计」；`security-data-verify.ps1` **34/34** |
+| HTTPS 传输加密 | ⚠️ | 只给了模板 `deploy/nginx-tls.conf.example`，**本机无法验证**（无 nginx/证书），上线前必须在目标机跑 |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）

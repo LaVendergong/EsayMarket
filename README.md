@@ -33,7 +33,7 @@ mall/
 ### 方式一：Docker Compose（最省事）
 
 ```bash
-cp .env.example .env      # 填 MYSQL_ROOT_PASSWORD 与 MALL_JWT_SECRET（都是必填，没有默认值）
+cp .env.example .env      # 填 MYSQL_ROOT_PASSWORD / MALL_JWT_SECRET / MALL_CRYPTO_SECRET（都是必填，没有默认值）
 docker compose up -d --build
 ```
 
@@ -79,7 +79,7 @@ cd frontend/portal-web && pnpm install && pnpm dev   # http://localhost:5174
 | 用途 | 账号 |
 |---|---|
 | 管理后台 | `malladmin` / `admin123456`（`t_user.role = 1`） |
-| H5 商城 | 没有预置账号，自己注册（用户名 4-32 位，密码 6-64 位） |
+| H5 商城 | 没有预置账号，自己注册（用户名 4-32 位；密码 8-64 位，**必须同时含字母和数字**） |
 
 ## 接口文档
 
@@ -118,6 +118,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/metrics-verify.ps1
 # 生产加固验证（17 项断言：traceId / CORS 白名单 / 登录失败限流；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/security-verify.ps1
 
+# 敏感数据安全验证（34 项断言：密码策略 / PII 字段加密 / 读写往返 / 日志无泄露；会自己停/起后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/security-data-verify.ps1
+
 # 商品域端到端（36 项断言）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1
 
@@ -152,6 +155,7 @@ node scripts/admin-crud-verify.mjs
 | 环境变量 | 说明 |
 |---|---|
 | `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致**，至少 32 字符 |
+| `MALL_CRYPTO_SECRET` | 敏感字段（手机号/收货人/地址）加密密钥，两个后端一致、至少 32 字符，**必须与 JWT 密钥不同**。⚠️ 上线后不要随意更换，否则旧密文解不开 |
 | `MALL_DB_PASSWORD` | 数据库口令（两个后端一致） |
 | `MALL_DB_URL` / `MALL_DB_USERNAME` | 数据库连接（默认 localhost / root） |
 | `MALL_CORS_ALLOWED_ORIGINS` | 允许跨域的来源（逗号分隔）。**不能含 `*`**，prod 启动自检会直接拦下 |
@@ -164,6 +168,9 @@ prod 下的行为差异：
   并发重复扫描是安全的（关单走条件 UPDATE，只有成功那次才释放库存）。要单点跑就把另一边的
   `MALL_ORDER_TIMEOUT_JOB_ENABLED` 设成 `false`
 - CORS 变成**显式白名单**（原来是通配来源 + 允许携带凭证，等于任意站点可带用户身份调后端）
+- **敏感数据在库里是加密的**：手机号、收货人、详细地址（含订单快照）都用 **AES-256-GCM** 字段级加密，enc:v1: 前缀标识密文；存量明文会在应用启动时自动补加密（幂等、双实例并发安全）。密码是 BCrypt，任何接口都不返回。scripts/security-data-verify.ps1 会用 34 项断言验证这件事（含「同一个手机号两行密文必须不同」）
+- **密码策略**：8-64 位且必须同时含字母和数字；超过 72 字节（BCrypt 的有效长度）直接拒绝
+- **传输加密**：容器只监听 80，HTTPS 需要在前面加一层 TLS 终止，模板见 deploy/nginx-tls.conf.example（含 HSTS / CSP / 安全响应头，**需在目标机验证**）
 - 登录有**失败次数限流**：同一用户名窗口内失败 5 次锁 5 分钟，锁定期间连正确密码也拒
 - 每个响应都带 `X-Trace-Id`（16 位 hex），日志行里也有，排查时让用户把它给你即可
 - 业务接口统一在 **`/api/v1/**`** 下（旧的无版本路径已移除，会 404）
@@ -181,7 +188,7 @@ prod 下的行为差异：
 > 这个自检是必需的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把解析不了的占位符
 > **原样保留而不是报错**，只靠 YAML 写 `${MALL_JWT_SECRET}` 拦不住（详见 `docs/AI-HANDOFF.md` §8 第 26 条）。
 
-CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V5、两个前端 typecheck+build。
+CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V6、两个前端 typecheck+build。
 
 ## 几个必须知道的坑
 

@@ -48,6 +48,13 @@ mall:
       # 计数在进程内存里，多副本部署要换成共享存储（否则上限会被放大到「副本数 × max-failures」）
       max-failures: ${MALL_LOGIN_MAX_FAILURES:5}
       lock-seconds: ${MALL_LOGIN_LOCK_SECONDS:300}
+  crypto:
+    # 敏感字段（手机号/收货人/地址）加密主密钥。**必须与 JWT 密钥分开**：
+    # 签名密钥泄露只影响 token，不该连带把库里所有 PII 一起交出去。
+    # 生产用 MALL_CRYPTO_SECRET 注入；⚠️ 换了密钥旧密文就解不开，轮换要走双密钥流程
+    secret: ${MALL_CRYPTO_SECRET:mall-dev-only-INSECURE-crypto-secret-0123456789abcdef}
+    # 启动时把库里残留的明文 PII 加密（幂等；两个应用同时跑也安全）
+    migrate-on-startup: ${MALL_CRYPTO_MIGRATE_ON_STARTUP:true}
 
 # 日志只打 stdout，格式在 backend/mall-core/src/main/resources/logback-spring.xml 里；
 # 目录/轮转交给运行环境（docker 的 json-file 上限见 docker-compose.yml，裸机交给 logrotate）。
