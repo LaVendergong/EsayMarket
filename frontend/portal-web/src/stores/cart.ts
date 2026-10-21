@@ -6,7 +6,7 @@ import { auth } from './auth'
 const count = ref(0)
 
 async function refresh() {
-  if (!auth.token.value) {
+  if (!auth.isLoggedIn()) {
     count.value = 0
     return
   }

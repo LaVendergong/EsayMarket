@@ -48,6 +48,12 @@ mall:
       # 计数在进程内存里，多副本部署要换成共享存储（否则上限会被放大到「副本数 × max-failures」）
       max-failures: ${MALL_LOGIN_MAX_FAILURES:5}
       lock-seconds: ${MALL_LOGIN_LOCK_SECONDS:300}
+    cookie:
+      # 登录态 Cookie（HttpOnly，JS 读不到，XSS 偷不走）。dev 是 http 所以必须 false；
+      # **prod 必须 true**（ProductionConfigGuard 会拦，因为 prod 必须在 TLS 后面）
+      secure: ${MALL_COOKIE_SECURE:false}
+      same-site: Lax
+      max-age-seconds: ${MALL_COOKIE_MAX_AGE:604800}
   crypto:
     # 敏感字段（手机号/收货人/地址）加密主密钥。**必须与 JWT 密钥分开**：
     # 签名密钥泄露只影响 token，不该连带把库里所有 PII 一起交出去。

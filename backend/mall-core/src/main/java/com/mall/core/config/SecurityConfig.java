@@ -1,5 +1,7 @@
 package com.mall.core.config;
 
+import com.mall.core.security.AuthCookies;
+import com.mall.core.security.CsrfFilter;
 import com.mall.core.security.JwtAuthFilter;
 import com.mall.core.web.TraceIdFilter;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +29,7 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
+    private final CsrfFilter csrfFilter;
 
     /** 无需登录即可访问的路径（业务接口统一在 /api/v1/** 下，见各 Controller 的 @RequestMapping） */
     private static final String[] WHITELIST = {
@@ -59,7 +62,9 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/**").authenticated()
                         .anyRequest().permitAll())
                 .exceptionHandling(e -> e.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                // CSRF 必须排在 JwtAuthFilter **之后**：它要根据「这次请求是靠 Cookie 还是 Bearer 认证的」决定要不要校验
+                .addFilterAfter(csrfFilter, JwtAuthFilter.class);
         return http.build();
     }
 
@@ -81,7 +86,7 @@ public class SecurityConfig {
         CorsConfiguration cfg = new CorsConfiguration();
         cfg.setAllowedOrigins(List.of(allowedOrigins));
         cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
-        cfg.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Trace-Id"));
+        cfg.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-Trace-Id", AuthCookies.CSRF_HEADER));
         // 让前端能读到 traceId（默认只暴露 Cache-Control 等少数几个响应头）
         cfg.setExposedHeaders(List.of(TraceIdFilter.HEADER));
         cfg.setAllowCredentials(true);

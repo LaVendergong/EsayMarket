@@ -174,6 +174,23 @@ try {
   const registered = await waitFor(onRoute('home'), 10000)
   check('注册并自动登录后进入首页', registered, `hash=${await evalJs('location.hash')}`)
 
+  // 安全加固的核心断言：登录态在 HttpOnly Cookie 里，**JS 侧存不下也用不到 token**。
+  // 如果这里检出 token，说明 localStorage 又被写回去了 —— XSS 就能把它偷走。
+  const leakToken = await evalJs(`localStorage.getItem('mall_portal_token')`)
+  const leakUser = (await evalJs(`localStorage.getItem('mall_portal_user') || ''`)) || ''
+  check(
+    '登录后 localStorage 里不保存 token（凭证只在 HttpOnly Cookie）',
+    !leakToken && !/eyJ[A-Za-z0-9_-]{10,}/.test(leakUser),
+    `token=${leakToken ? 'LEAKED' : 'none'} userHasJwt=${/eyJ[A-Za-z0-9_-]{10,}/.test(leakUser)}`
+  )
+  // Cookie 是 HttpOnly，JS 读不到（document.cookie 里只应看到 CSRF 那个）
+  const jsCookies = (await evalJs('document.cookie || ""')) || ''
+  check(
+    'JS 读不到登录 Cookie，只读得到 CSRF Cookie',
+    !jsCookies.includes('mall_portal_token') && jsCookies.includes('mall_csrf'),
+    `cookie=${jsCookies}`
+  )
+
   // ================================================================ H5：首页 → 商品详情
   log('')
   log('--- H5：浏览 → 选规格 → 加购 ---')

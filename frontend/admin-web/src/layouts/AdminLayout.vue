@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Files, Goods, Tickets } from '@element-plus/icons-vue'
+import { authApi } from '@/api'
 import { auth } from '@/stores/auth'
 import AppErrorBoundary from '@/components/AppErrorBoundary.vue'
 
@@ -28,6 +29,8 @@ async function onCommand(cmd: string) {
   } catch {
     return
   }
+  // 先让服务端清 HttpOnly Cookie（前端删不掉它）
+  await authApi.logout().catch(() => {})
   auth.clear()
   ElMessage.success('已退出')
   router.replace({ name: 'login' })

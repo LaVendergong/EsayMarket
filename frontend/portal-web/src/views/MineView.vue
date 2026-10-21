@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { showConfirmDialog, showSuccessToast } from 'vant'
-import { userApi } from '@/api'
+import { authApi, userApi } from '@/api'
 import { auth } from '@/stores/auth'
 import { cart } from '@/stores/cart'
 import type { UserVO } from '@/types'
@@ -11,7 +11,7 @@ const router = useRouter()
 const me = ref<UserVO | null>(null)
 
 onMounted(async () => {
-  if (!auth.token.value) return
+  if (!auth.isLoggedIn()) return
   try {
     me.value = await userApi.me()
   } catch {
@@ -25,6 +25,8 @@ async function logout() {
   } catch {
     return
   }
+  // 先让服务端把 HttpOnly Cookie 清掉（前端删不掉它）
+  await authApi.logout().catch(() => {})
   auth.clear()
   cart.clear()
   me.value = null
@@ -33,7 +35,7 @@ async function logout() {
 }
 
 function goto(path: string) {
-  if (!auth.token.value) {
+  if (!auth.isLoggedIn()) {
     router.push({ name: 'login', query: { redirect: path } })
     return
   }
@@ -44,7 +46,7 @@ function goto(path: string) {
 <template>
   <div class="pb-tabbar">
     <div class="profile">
-      <template v-if="auth.token.value">
+      <template v-if="auth.isLoggedIn()">
         <div class="avatar">{{ (me?.nickname || me?.username || 'U').slice(0, 1).toUpperCase() }}</div>
         <div>
           <div class="nick">{{ me?.nickname || me?.username }}</div>
@@ -67,7 +69,7 @@ function goto(path: string) {
       <van-cell title="购物车" is-link @click="goto('/cart')" />
     </van-cell-group>
 
-    <van-cell-group v-if="auth.token.value" inset class="block">
+    <van-cell-group v-if="auth.isLoggedIn()" inset class="block">
       <van-cell title="退出登录" is-link @click="logout" />
     </van-cell-group>
 

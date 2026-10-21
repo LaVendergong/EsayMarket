@@ -121,6 +121,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/security-verify.ps1
 # 敏感数据安全验证（34 项断言：密码策略 / PII 字段加密 / 读写往返 / 日志无泄露；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/security-data-verify.ps1
 
+# 登录态验证（27 项断言：HttpOnly Cookie / CSRF 双提交 / 退出清理；会自己停/起后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/auth-cookie-verify.ps1
+
 # 商品域端到端（36 项断言）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1
 
@@ -130,7 +133,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p3-verify.ps1
 # 前端页面渲染检查（24 项断言 + 控制台告警零容忍；需要 Chrome + 前后端都已启动）
 node scripts/web-check.mjs
 
-# 前端全流程交互测试（39 项断言：真点按钮跑完整个购物闭环，含「立即购买」与「取消订单」）
+# 前端全流程交互测试（41 项断言：真点按钮跑完整个购物闭环，含「立即购买」「取消订单」与「登录后不落 token」）
 node scripts/web-flow.mjs
 
 # 管理后台 UI CRUD（16 项断言：分类增删改禁用 / 商品新增-下架-删除）
@@ -156,6 +159,7 @@ node scripts/admin-crud-verify.mjs
 |---|---|
 | `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致**，至少 32 字符 |
 | `MALL_CRYPTO_SECRET` | 敏感字段（手机号/收货人/地址）加密密钥，两个后端一致、至少 32 字符，**必须与 JWT 密钥不同**。⚠️ 上线后不要随意更换，否则旧密文解不开 |
+| `MALL_COOKIE_SECURE` | 登录态 Cookie 是否只在 HTTPS 下发送。**prod 必须 `true`**（自检会拦），dev（http）必须 `false` |
 | `MALL_DB_PASSWORD` | 数据库口令（两个后端一致） |
 | `MALL_DB_URL` / `MALL_DB_USERNAME` | 数据库连接（默认 localhost / root） |
 | `MALL_CORS_ALLOWED_ORIGINS` | 允许跨域的来源（逗号分隔）。**不能含 `*`**，prod 启动自检会直接拦下 |
@@ -169,6 +173,7 @@ prod 下的行为差异：
   `MALL_ORDER_TIMEOUT_JOB_ENABLED` 设成 `false`
 - CORS 变成**显式白名单**（原来是通配来源 + 允许携带凭证，等于任意站点可带用户身份调后端）
 - **敏感数据在库里是加密的**：手机号、收货人、详细地址（含订单快照）都用 **AES-256-GCM** 字段级加密，enc:v1: 前缀标识密文；存量明文会在应用启动时自动补加密（幂等、双实例并发安全）。密码是 BCrypt，任何接口都不返回。scripts/security-data-verify.ps1 会用 34 项断言验证这件事（含「同一个手机号两行密文必须不同」）
+- **登录态在 HttpOnly Cookie 里**（`SameSite=Lax` + 前端 `X-CSRF-Token` 双提交校验），**localStorage 不存 token** —— XSS 读不到凭证；脚本/服务端仍可用 `Authorization: Bearer`，且不受 CSRF 影响
 - **密码策略**：8-64 位且必须同时含字母和数字；超过 72 字节（BCrypt 的有效长度）直接拒绝
 - **传输加密**：容器只监听 80，HTTPS 需要在前面加一层 TLS 终止，模板见 deploy/nginx-tls.conf.example（含 HSTS / CSP / 安全响应头，**需在目标机验证**）
 - 登录有**失败次数限流**：同一用户名窗口内失败 5 次锁 5 分钟，锁定期间连正确密码也拒

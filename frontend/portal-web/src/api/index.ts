@@ -17,7 +17,9 @@ export const authApi = {
   register: (dto: { username: string; password: string; nickname?: string; phone?: string }) =>
     http.post<never, number>('/portal/auth/register', dto),
   login: (username: string, password: string) =>
-    http.post<never, LoginVO>('/portal/auth/login', { username, password })
+    http.post<never, LoginVO>('/portal/auth/login', { username, password }),
+  /** 退出：Cookie 是 HttpOnly 的，前端删不掉，必须让服务端清 */
+  logout: () => http.post<never, void>('/portal/auth/logout')
 }
 
 export const userApi = {

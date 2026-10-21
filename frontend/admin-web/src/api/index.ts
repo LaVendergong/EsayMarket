@@ -13,7 +13,9 @@ import type {
 /** 后台认证（仅 role=1 可登录） */
 export const authApi = {
   login: (username: string, password: string) =>
-    http.post<never, LoginVO>('/admin/auth/login', { username, password })
+    http.post<never, LoginVO>('/admin/auth/login', { username, password }),
+  /** 退出：Cookie 是 HttpOnly 的，必须由服务端清除 */
+  logout: () => http.post<never, void>('/admin/auth/logout')
 }
 
 export const categoryApi = {

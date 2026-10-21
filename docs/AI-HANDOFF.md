@@ -103,6 +103,7 @@ D:\projects\mall\
 │   ├── timeout-job-verify.ps1    超时关单验证（18 项断言：单应用能关 + 两应用只关一次）
 │   ├── security-verify.ps1       生产加固验证（17 项断言：traceId / CORS 白名单 / 登录限流）
 │   ├── security-data-verify.ps1  敏感数据安全验证（34 项断言：密码策略 / PII 静态加密 / 往返 / 日志 / 指标）
+│   ├── auth-cookie-verify.ps1    登录态验证（27 项断言：HttpOnly / SameSite / CSRF 双提交 / 退出清理 / 两应用隔离）
 │   ├── backup-db.ps1             数据库逻辑备份（mysqldump 一致性快照，保留最近 N 份）
 │   ├── restore-db.ps1            从备份恢复（默认恢复到临时库，覆盖 mall 必须 -Force）
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
@@ -166,7 +167,7 @@ pnpm typecheck    # vue-tsc 类型检查（vite build 本身不做类型检查�
 - **pnpm 11 默认拦截依赖的安装脚本**，两个工程都在自己的 `pnpm-workspace.yaml` 里写了 `allowBuilds: esbuild: true`；
   少了它 `pnpm install` 会以 `ERR_PNPM_IGNORED_BUILDS` 失败（`pnpm` 字段写在 package.json 里**已不生效**，pnpm 11 起只读 pnpm-workspace.yaml）。
 - 后台账号 `malladmin / admin123456`（登录页已预填）；H5 没有预置账号，**先注册**即可。
-- 登录态放 localStorage（admin 用 `mall_admin_token`，H5 用 `mall_portal_token`），都是 hash 路由。
+- 登录态在 **HttpOnly Cookie**（admin 用 `mall_admin_token`，H5 用 `mall_portal_token`）；localStorage 只存展示用的用户信息；都是 hash 路由。
 - 两个 dev server 都只监听本机；生产部署 `pnpm build` 产物丢任意静态服务器即可（hash 路由，不用配 rewrite）。
 - **端口被别的项目占着时**：`node scripts\web-check.mjs` / `web-flow.mjs` 的地址可用环境变量覆盖
   （`ADMIN_WEB_URL` / `PORTAL_WEB_URL`），例如本机 5173 曾被另一项目占用，就把我们的后台起在 5175
@@ -216,6 +217,7 @@ CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在�
 |---|---|---|
 | `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致** | `mall-dev-only-INSECURE-…`（明确标了不安全） |
 | `MALL_CRYPTO_SECRET` | PII 字段加密主密钥（AES-256-GCM）。**两个后端必须一致、且必须与 `MALL_JWT_SECRET` 不同**；⚠️ 上线后不可随意更换 | `mall-dev-only-INSECURE-crypto-secret-…`（prod 自检会拦） |
+| `MALL_COOKIE_SECURE` | 登录态 Cookie 是否只在 HTTPS 下发送。**prod 必须 true**（自检会拦 false），dev 必须 false（http 下 Secure Cookie 不会下发） | false |
 | `MALL_DB_URL` / `MALL_DB_USERNAME` / `MALL_DB_PASSWORD` | 数据库连接 | localhost / root / `521131` |
 | `MALL_ORDER_EXPIRE_MINUTES` | 未支付订单有效期 | 30 |
 | `MALL_ORDER_TIMEOUT_JOB_ENABLED` / `_INTERVAL_MILLIS` | 超时关单任务开关与间隔 | **两个应用都是 true**；10 秒 |
@@ -669,6 +671,18 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
       要匹配 `enc:v1:[A-Za-z0-9_-]{16,}`（前缀 + 真正的载荷）
 51. **本项目的接口约定是「HTTP 200 + 业务码」**：弱密码被拒时 http 仍是 200、`body.code=400`。
     断言别写 `http -ne 200`（踩过一次，4 条断言全"假失败"，实际策略是生效的）。要看 `Code($resp)`。
+52. **Cookie 不区分端口**：localhost 下 `:5173`、`:5174`、`:8081`、`:8090` 共享同一批 Cookie。
+    所以管理后台和 H5 **必须用不同的 Cookie 名**（`mall_admin_token` / `mall_portal_token`），
+    否则两边的登录态会互相覆盖/互相认。
+53. **`Secure` 标记在 http 环境下会让 Cookie 完全不下发**：dev 是 `http://localhost`，
+    `secure=true` 时浏览器直接丢弃 → 表现是「登录成功但下一个请求就 401」，非常迷惑。
+    dev 必须 `false`、prod 必须 `true`（由 `ProductionConfigGuard` 强制）。
+54. **改成 Cookie 认证后，前端不能再拿 token 判断登录态**：凭证已经不在 JS 里了，
+    继续用 `auth.token.value` 做守卫会导致**登录成功后立刻被踢回登录页**。
+    要用本地保存的 user 信息（本项目是 `auth.isLoggedIn()`）。
+55. **CSRF 只对「Cookie 认证的写请求」校验**：如果无差别要求所有写请求带 `X-CSRF-Token`，
+    所有 Bearer 脚本（p2/p3/幂等/监控…）全都会 403 —— 而它们本来就没有 CSRF 风险
+    （攻击者站点没法让浏览器自动带上 `Authorization` 头）。判断依据是 `JwtAuthFilter` 记下的凭证来源。
 38. **等「页面出现某段文字」还不够，要等「你要点的那个操作所需的数据」就绪**（§8 第 23 条的变体）：
     结算页 `load()` 是**先取地址、再取购物车清单**，地址卡片一出现测试就去点「提交订单」，
     而此时 `items` 还是空的 → `submit()` 直接 return（只弹个 toast），后端根本没收到请求。
@@ -784,7 +798,7 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 | 日志 | ✅ 扫过：无手机号、无密码哈希、无 token；但有一条 Spring 自动生成的默认密码 | ✅ 已消除（排除 `UserDetailsServiceAutoConfiguration`） |
 | 备份文件 | ❌ 原来**没有备份** | ✅ 有备份；且因为列级加密，dump 里的 PII 已是密文（密码哈希仍是哈希） |
 | 传输 | ❌ **全程明文 HTTP**（密码、JWT、手机号裸奔） | ⚠️ 只给了模板 `deploy/nginx-tls.conf.example`（TLS1.2/1.3 + HSTS + CSP + 安全头）。**本机没有 nginx 和证书，无法验证 —— 这一项必须在目标机完成** |
-| 前端 | ✅ 无 `console.log`；token 存 localStorage（XSS 面，靠 CSP 收窄） | CSP 模板已给（先 Report-Only 观察再强制） |
+| 前端 | ⚠️ 无 `console.log`，但 token 存 localStorage（XSS 能读走） | ✅ 已迁 **HttpOnly Cookie**（见下方「登录态迁移」）；CSP 模板已给 |
 
 #### PII 字段级加密怎么做的
 
@@ -821,9 +835,60 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 #### 仍未做的（如实列出）
 
 1. **传输加密**要在目标机落地（模板已给，未验证）。
-2. **token 存 localStorage** + 7 天有效期 + **无吊销机制**：XSS 拿到 token 就能用到过期。缓解是 CSP；根治要么迁 httpOnly Cookie + CSRF token，要么加 jti 黑名单。
+2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. **密钥轮换**没做双密钥流程：直接改 `mall.crypto.secret` 会导致旧密文全部解不开（代码会报错而不是给脏数据）。
+
+### 登录态：localStorage → HttpOnly Cookie + CSRF（`auth-cookie-verify.ps1` 27/27）
+
+**问题**：token 存 localStorage，**任何 XSS 都能读走**，而且读走后可以离线用满 7 天有效期。
+这是上一轮审计里我自己列的「仍未做」第 2 条。
+
+**做法**：
+
+- 登录成功由服务端下发 `mall_portal_token` / `mall_admin_token`：**HttpOnly** + `SameSite=Lax` + `Path=/`，
+  prod 还要 **Secure**（`ProductionConfigGuard` 强制，等于要求 prod 必须跑在 TLS 后面）。
+- 另发一个 **JS 可读**的 `mall_csrf`（双提交令牌），前端把它放进请求头 `X-CSRF-Token`。
+- `JwtAuthFilter` 支持两种凭证，顺序：`Authorization: Bearer`（脚本 / 服务端）→ Cookie（浏览器），
+  并把**来源**记到请求属性 `mall.auth.source`。
+- `CsrfFilter` **只对「靠 Cookie 认证的写请求」校验** —— Bearer 客户端完全不受影响
+  （否则所有自动化脚本都得改，且它们本来就没有 CSRF 风险）。
+- 新增 `POST /auth/logout`：Cookie 是 HttpOnly 的，前端删不掉，必须服务端清（下发 `Max-Age=0`）。
+- 前端：`localStorage` 只存 `user`（且把其中的 token 字段抹成空串），
+  `isLoggedIn()` 改用 user 判断（凭证已经不在前端了）。
+
+**为什么有了 SameSite 还要 CSRF**：Cookie 是浏览器自动携带的，攻击者站点可以让浏览器发起跨站 POST。
+`SameSite=Lax` 能挡掉大部分，但那是**浏览器行为**（老浏览器 / 某些 WebView 不遵守）；
+双提交是服务端强制的，不依赖浏览器。
+
+**验证**（27 项，`tmp\auth-cookie\summary.txt`）：
+
+```
+[PASS] A2 token cookie is HttpOnly (JS cannot read it) :: ...; HttpOnly; SameSite=Lax
+[PASS] A5 CSRF cookie is set and JS-readable (not HttpOnly) :: mall_csrf=...; SameSite=Lax
+[PASS] B1 /user/me works with cookie only (no Authorization header) :: http=200
+[PASS] B3 no credential at all -> 401
+[PASS] C1 cookie + POST without X-CSRF-Token -> 403 :: {"code":403,"message":"CSRF 校验失败..."}
+[PASS] C4 cookie + POST with correct X-CSRF-Token -> accepted
+[PASS] D1 Bearer + POST without CSRF header -> accepted (scripts keep working)
+[PASS] E1 logout returns clearing Set-Cookie :: mall_portal_token=; Path=/; Max-Age=0; HttpOnly
+[PASS] E3 old session no longer authenticates -> 401
+[PASS] F3 a portal-only session cannot touch the admin API -> 401
+```
+
+浏览器侧由 `web-flow` 断言（41/41）——这两条才是「XSS 偷不走」的直接证据：
+
+```
+[PASS] 登录后 localStorage 里不保存 token（凭证只在 HttpOnly Cookie） :: token=none userHasJwt=false
+[PASS] JS 读不到登录 Cookie，只读得到 CSRF Cookie :: cookie=mall_csrf=443990289556429d962db87972063ff0
+```
+
+**代价 / 取舍（如实记录）**：
+
+- 登录响应体里**仍然返回 token**（给脚本和服务端调用走 Bearer）。浏览器端忽略它。
+  严格说，XSS 若恰好在"登录那一刻"运行，仍可能截到这个响应；但它拿不到**持久化在浏览器里的凭证**，
+  也没法在用户下次访问时复用。要彻底消除，得让登录响应按"是否需要 body token"分流。
+- 仍未做 refresh token / 主动吊销（7 天有效期内一直可用）。
 
 ### 监控（Prometheus，`metrics-verify.ps1` 16/16）
 
@@ -902,6 +967,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 测试覆盖（H5 取消订单） | ✅ | `web-flow.mjs` 39/39（新增取消订单 + 释放库存断言） |
 | 监控指标（Prometheus） | ✅ | `/actuator/prometheus` + 两个业务计数器，见下方「监控」；`metrics-verify.ps1` 16/16 |
 | 敏感数据加密（密码 / PII / 日志 / 密钥） | ✅ | 见下方「敏感数据安全审计」；`security-data-verify.ps1` **34/34** |
+| 登录态改 HttpOnly Cookie + CSRF | ✅ | 见下方「登录态迁移」；`auth-cookie-verify.ps1` **27/27** |
 | HTTPS 传输加密 | ⚠️ | 只给了模板 `deploy/nginx-tls.conf.example`，**本机无法验证**（无 nginx/证书），上线前必须在目标机跑 |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 

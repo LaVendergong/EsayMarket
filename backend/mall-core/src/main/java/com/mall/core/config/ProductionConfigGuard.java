@@ -49,6 +49,7 @@ public class ProductionConfigGuard {
         requireReal("spring.datasource.password", null);
         checkCorsOrigins();
         checkCryptoSecret();
+        checkCookieSecure();
 
         log.info("[prod 启动自检] 通过：JWT 密钥、数据库口令、PII 加密密钥均已从环境变量注入");
     }
@@ -69,6 +70,22 @@ public class ProductionConfigGuard {
                 throw new IllegalStateException("[prod 启动自检失败] mall.cors.allowed-origins 不能包含 *"
                         + "（本项目开启 allowCredentials，通配来源等于允许任意站点携带用户凭证调用）");
             }
+        }
+    }
+
+    /**
+     * prod 下登录态 Cookie 必须是 Secure 的。
+     *
+     * <p>Cookie 的 Secure 标记决定它「只在 HTTPS 下发送」。
+     * prod 若还是 false，等于把登录态放在明文连接上跑 —— 而 Cookie 是浏览器自动携带的，
+     * 一旦被嗅探，攻击者拿到的是完整的登录态。
+     * 反过来说，这条检查也强制了 prod 必须部署在 TLS 后面（没有 HTTPS 就别想上线）。
+     */
+    private void checkCookieSecure() {
+        String secure = env.getProperty("mall.security.cookie.secure");
+        if (!"true".equalsIgnoreCase(secure)) {
+            throw new IllegalStateException("[prod 启动自检失败] mall.security.cookie.secure 必须为 true："
+                    + "登录态存在 HttpOnly Cookie 里，prod 必须在 HTTPS 后面（设 MALL_COOKIE_SECURE=true）");
         }
     }
 

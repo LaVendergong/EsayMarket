@@ -42,6 +42,8 @@ class ProductionConfigGuardTest {
         props.put("mall.jwt.secret", secret);
         props.put("spring.datasource.password", password);
         props.put("mall.crypto.secret", crypto);
+        // prod 下登录态 Cookie 必须 Secure（客户端与服务端都按 HTTPS 部署）
+        props.put("mall.security.cookie.secure", "true");
         if (corsOrigins != null) {
             props.put("mall.cors.allowed-origins", corsOrigins);
         }
@@ -79,6 +81,23 @@ class ProductionConfigGuardTest {
         assertThatThrownBy(() -> new ProductionConfigGuard(env).check())
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("mall.crypto.secret");
+    }
+
+    @Test
+    void prod_withInsecureCookie_isRejected() {
+        // 用反射之外的简单办法：直接换一个 env，把 cookie.secure 改成 false
+        Map<String, String> props = new HashMap<>();
+        props.put("mall.jwt.secret", GOOD_SECRET);
+        props.put("spring.datasource.password", GOOD_PASSWORD);
+        props.put("mall.crypto.secret", GOOD_CRYPTO);
+        props.put("mall.security.cookie.secure", "false");
+        Environment env = mock(Environment.class);
+        when(env.acceptsProfiles(any(Profiles.class))).thenReturn(true);
+        when(env.getProperty(anyString())).thenAnswer(inv -> props.get(inv.getArgument(0, String.class)));
+
+        assertThatThrownBy(() -> new ProductionConfigGuard(env).check())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mall.security.cookie.secure");
     }
 
     @Test

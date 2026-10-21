@@ -8,11 +8,25 @@ import { auth } from '@/stores/auth'
  * - 业务失败：HTTP 200 但 code != 200，弹提示并 reject
  * - 未认证：真正的 HTTP 401（body 为空），清 token 回登录页
  */
-export const http = axios.create({ baseURL: '/api/v1', timeout: 15000 })
+export const http = axios.create({ baseURL: '/api/v1', timeout: 15000, withCredentials: true })
+
+/** 读非 HttpOnly 的 CSRF Cookie（服务端下发，前端放进请求头做双提交校验） */
+function readCsrf(): string {
+  const hit = document.cookie.split('; ').find((c) => c.startsWith('mall_csrf='))
+  return hit ? decodeURIComponent(hit.slice('mall_csrf='.length)) : ''
+}
 
 http.interceptors.request.use((config) => {
+  // 登录态默认走 HttpOnly Cookie（浏览器自动携带）。只有灰度期/自动化测试塞进来的旧 token 才走 Bearer。
   if (auth.token.value) {
     config.headers.Authorization = `Bearer ${auth.token.value}`
+    return config
+  }
+  // 写操作要带 CSRF 头（服务端只在「Cookie 认证」时校验，Bearer 请求不需要）
+  const method = (config.method || 'get').toUpperCase()
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrf = readCsrf()
+    if (csrf) config.headers['X-CSRF-Token'] = csrf
   }
   return config
 })

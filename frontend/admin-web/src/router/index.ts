@@ -86,7 +86,7 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   if (to.meta.public) return true
-  if (!auth.token.value) {
+  if (!auth.isLoggedIn()) {
     return { name: 'login', query: { redirect: to.fullPath } }
   }
   return true
