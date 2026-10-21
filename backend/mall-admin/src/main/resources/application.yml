@@ -61,6 +61,10 @@ mall:
     secret: ${MALL_CRYPTO_SECRET:mall-dev-only-INSECURE-crypto-secret-0123456789abcdef}
     # 启动时把库里残留的明文 PII 加密（幂等；两个应用同时跑也安全）
     migrate-on-startup: ${MALL_CRYPTO_MIGRATE_ON_STARTUP:true}
+    # 仅用于**解密**的历史密钥（逗号分隔），密钥轮换过渡期用；重加密完成后必须清空
+    previous-secrets: ${MALL_CRYPTO_PREVIOUS_SECRETS:}
+    # 一次性运维开关：启动时把仍在历史密钥下的密文重加密成当前密钥。平时保持 false
+    re-encrypt-on-startup: ${MALL_CRYPTO_RE_ENCRYPT_ON_STARTUP:false}
 
 # 日志只打 stdout，格式在 backend/mall-core/src/main/resources/logback-spring.xml 里；
 # 目录/轮转交给运行环境（docker 的 json-file 上限见 docker-compose.yml，裸机交给 logrotate）。

@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 存量明文 PII 的加密迁移用的裸 SQL。
+ * 存量 PII 的加密迁移 / 密钥轮换用的裸 SQL。
  *
  * <p><b>为什么放在 {@code com.mall.core.mapper} 包</b>：{@code MybatisPlusConfig} 上是
  * {@code @MapperScan("com.mall.core.mapper")}，只有这个包会被注册成 Mapper；
@@ -59,4 +59,26 @@ public interface PiiMigrationMapper {
 
     @Update("UPDATE t_order SET receiver_addr = #{enc} WHERE id = #{id} AND receiver_addr = #{old}")
     int updateOrderReceiverAddr(@Param("id") long id, @Param("enc") String enc, @Param("old") String old);
+
+    // ================================================================== 密钥轮换
+    // 只筛「已加密、但不是用当前 keyId 加密」的值。密文形如 enc:v1:<kid>:<payload>，
+    // 所以能用一条 SQL 精确命中要重加密的行，不必全表解密试探。
+    // kid 是 hex，不含 LIKE 的通配符（% _），拼进 CONCAT 是安全的。
+
+    @Select("SELECT id AS id, phone AS phone FROM t_user "
+            + "WHERE phone LIKE 'enc:v1:%' AND phone NOT LIKE CONCAT('enc:v1:', #{kid}, ':%')")
+    List<Map<String, Object>> usersNotUnderKey(@Param("kid") String kid);
+
+    @Select("SELECT id AS id, receiver AS receiver, phone AS phone, detail AS detail FROM t_address "
+            + "WHERE (receiver LIKE 'enc:v1:%' AND receiver NOT LIKE CONCAT('enc:v1:', #{kid}, ':%')) "
+            + "   OR (phone LIKE 'enc:v1:%' AND phone NOT LIKE CONCAT('enc:v1:', #{kid}, ':%')) "
+            + "   OR (detail LIKE 'enc:v1:%' AND detail NOT LIKE CONCAT('enc:v1:', #{kid}, ':%'))")
+    List<Map<String, Object>> addressesNotUnderKey(@Param("kid") String kid);
+
+    @Select("SELECT id AS id, receiver AS receiver, receiver_phone AS receiverPhone, "
+            + "       receiver_addr AS receiverAddr FROM t_order "
+            + "WHERE (receiver LIKE 'enc:v1:%' AND receiver NOT LIKE CONCAT('enc:v1:', #{kid}, ':%')) "
+            + "   OR (receiver_phone LIKE 'enc:v1:%' AND receiver_phone NOT LIKE CONCAT('enc:v1:', #{kid}, ':%')) "
+            + "   OR (receiver_addr LIKE 'enc:v1:%' AND receiver_addr NOT LIKE CONCAT('enc:v1:', #{kid}, ':%'))")
+    List<Map<String, Object>> ordersNotUnderKey(@Param("kid") String kid);
 }

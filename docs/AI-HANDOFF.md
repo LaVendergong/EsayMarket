@@ -104,6 +104,7 @@ D:\projects\mall\
 │   ├── security-verify.ps1       生产加固验证（17 项断言：traceId / CORS 白名单 / 登录限流）
 │   ├── security-data-verify.ps1  敏感数据安全验证（34 项断言：密码策略 / PII 静态加密 / 往返 / 日志 / 指标）
 │   ├── auth-cookie-verify.ps1    登录态验证（27 项断言：HttpOnly / SameSite / CSRF 双提交 / 退出清理 / 两应用隔离）
+│   ├── crypto-rotate-verify.ps1  密钥轮换演练（28 项断言：换密钥→旧数据仍可读→重加密→去掉旧密钥仍可读→还原）
 │   ├── backup-db.ps1             数据库逻辑备份（mysqldump 一致性快照，保留最近 N 份）
 │   ├── restore-db.ps1            从备份恢复（默认恢复到临时库，覆盖 mall 必须 -Force）
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
@@ -218,6 +219,8 @@ CI：`.github/workflows/ci.yml`，三个 job —— 后端编译+单测、**在�
 | `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致** | `mall-dev-only-INSECURE-…`（明确标了不安全） |
 | `MALL_CRYPTO_SECRET` | PII 字段加密主密钥（AES-256-GCM）。**两个后端必须一致、且必须与 `MALL_JWT_SECRET` 不同**；⚠️ 上线后不可随意更换 | `mall-dev-only-INSECURE-crypto-secret-…`（prod 自检会拦） |
 | `MALL_COOKIE_SECURE` | 登录态 Cookie 是否只在 HTTPS 下发送。**prod 必须 true**（自检会拦 false），dev 必须 false（http 下 Secure Cookie 不会下发） | false |
+| `MALL_CRYPTO_PREVIOUS_SECRETS` | 轮换过渡期**仅用于解密**的历史密钥（逗号分隔）。重加密完成后必须清空 | 空 |
+| `MALL_CRYPTO_RE_ENCRYPT_ON_STARTUP` | 一次性开关：启动时把仍在历史密钥下的数据重加密成当前密钥 | false |
 | `MALL_DB_URL` / `MALL_DB_USERNAME` / `MALL_DB_PASSWORD` | 数据库连接 | localhost / root / `521131` |
 | `MALL_ORDER_EXPIRE_MINUTES` | 未支付订单有效期 | 30 |
 | `MALL_ORDER_TIMEOUT_JOB_ENABLED` / `_INTERVAL_MILLIS` | 超时关单任务开关与间隔 | **两个应用都是 true**；10 秒 |
@@ -683,6 +686,17 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 55. **CSRF 只对「Cookie 认证的写请求」校验**：如果无差别要求所有写请求带 `X-CSRF-Token`，
     所有 Bearer 脚本（p2/p3/幂等/监控…）全都会 403 —— 而它们本来就没有 CSRF 风险
     （攻击者站点没法让浏览器自动带上 `Authorization` 头）。判断依据是 `JwtAuthFilter` 记下的凭证来源。
+56. **字段加密的密文必须带 keyId**（`enc:v1:<kid>:<payload>`）：没有它就无法判断"这行是用哪把密钥加的"，
+    密钥轮换时只能全表解密试探，几百万行根本没法做。有了 keyId，一条
+    `WHERE col NOT LIKE CONCAT('enc:v1:', '<newKid>', ':%')` 就能精确圈出要重加密的行。
+57. **base64url 不含 `:`，所以格式可以靠冒号切分**：`enc:v1:` 之后有冒号 = 新格式（kid:payload），
+    没有冒号 = 早期格式。升级格式时**两种都要能读**，否则上线即全库解密失败。
+58. **重加密/补加密的 UPDATE 一定要带「旧值」做乐观条件**（`WHERE id=? AND col=?`）：
+    幂等靠它、双实例并发安全也靠它（后到的那次命中 0 行直接跳过）。
+    别用 `WHERE id=?` 直接覆盖 —— 两个应用同时启动时会互相打断。
+59. **写演练脚本时，别假设"现有数据一定在某个 keyId 下"**：上一版代码写的密文可能连 keyId 都没有。
+    我第一次写轮换演练就栽在这：断言"数据在旧 kid 下"恒为 0。
+    正确判据是「存在加密的 PII」+「轮换后数据**还未**迁到新 kid」。
 38. **等「页面出现某段文字」还不够，要等「你要点的那个操作所需的数据」就绪**（§8 第 23 条的变体）：
     结算页 `load()` 是**先取地址、再取购物车清单**，地址卡片一出现测试就去点「提交订单」，
     而此时 `items` 还是空的 → `submit()` 直接 return（只弹个 toast），后端根本没收到请求。
@@ -837,7 +851,39 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 1. **传输加密**要在目标机落地（模板已给，未验证）。
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
-4. **密钥轮换**没做双密钥流程：直接改 `mall.crypto.secret` 会导致旧密文全部解不开（代码会报错而不是给脏数据）。
+4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 密钥轮换（`crypto-rotate-verify.ps1` 28/28）
+
+**问题**：只有一把密钥、改了就解不开 —— 密钥一旦泄露，唯一出路是"全部数据作废"，没有补救手段。
+
+**做法**：
+
+- 密文格式升级为 `enc:v1:<keyId>:<base64url(iv‖密文‖tag)>`，其中 `keyId` = SHA-256(secret) 的前 8 个 hex。
+  带 keyId 的好处很实际：**哪些数据还在旧密钥下，一条 SQL 就能精确筛出来**，不必全表解密试探。
+- `mall.crypto.previous-secrets`（**仅用于解密**）+ `mall.crypto.re-encrypt-on-startup`（一次性开关）。
+- 早期格式 `enc:v1:<payload>`（没有 keyId）照样能读（先试当前密钥、再逐个试历史密钥），
+  所以这次格式升级**不需要停机重写历史数据**。
+- 重加密用「旧值」做乐观条件（`AND <列> = 旧值`），幂等且双实例并发安全。
+
+**三步操作（不用写代码）**：
+
+1. `MALL_CRYPTO_SECRET=新` + `MALL_CRYPTO_PREVIOUS_SECRETS=旧` → 重启：新写入用新密钥，旧数据仍可读
+2. 再加 `MALL_CRYPTO_RE_ENCRYPT_ON_STARTUP=true` → 重启一次，把旧数据全部重加密
+3. 确认「不在新 kid 下」的行数为 0 后，清掉 `previous-secrets` 和开关
+
+**验证**（28 项，`tmp\crypto-rotate\summary.txt`）—— 不是"看代码觉得能行"，是真的重启四次跑出来的：
+
+| 阶段 | 断言 |
+|---|---|
+| **A** 新密钥 + previous=旧 | 旧数据仍可读（`code=200 rows=3 ciphertextLeak=False`）；且**数据物理上还没迁**（说明"换密钥"本身不重写数据） |
+| **B** 开重加密 | `t_order` / `t_user.phone` / `t_address.phone` 里**没有一行**还挂在旧密钥下 |
+| **C** 只留新密钥（不给 previous） | 仍可读 —— **这条才是真正的证明**：如果重加密没发生，这里必然解密失败 |
+| **D** 还原 | 数据回到默认密钥，环境恢复成默认，普通启动仍可读 |
+
+> 我第一版演练有两条断言写错了：假设"现有数据一定在某个 keyId 下"。
+> 实际上库里当时是**上一版代码写的无 keyId 旧格式**，所以正确判据是「存在加密 PII」+
+> 「轮换后数据仍未迁到新 kid」，而不是「在旧 kid 下」（§8 第 59 条）。
 
 ### 登录态：localStorage → HttpOnly Cookie + CSRF（`auth-cookie-verify.ps1` 27/27）
 
@@ -968,6 +1014,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 监控指标（Prometheus） | ✅ | `/actuator/prometheus` + 两个业务计数器，见下方「监控」；`metrics-verify.ps1` 16/16 |
 | 敏感数据加密（密码 / PII / 日志 / 密钥） | ✅ | 见下方「敏感数据安全审计」；`security-data-verify.ps1` **34/34** |
 | 登录态改 HttpOnly Cookie + CSRF | ✅ | 见下方「登录态迁移」；`auth-cookie-verify.ps1` **27/27** |
+| PII 加密密钥轮换（双密钥 + 重加密） | ✅ | 见下方「密钥轮换」；`crypto-rotate-verify.ps1` **28/28** |
 | HTTPS 传输加密 | ⚠️ | 只给了模板 `deploy/nginx-tls.conf.example`，**本机无法验证**（无 nginx/证书），上线前必须在目标机跑 |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 

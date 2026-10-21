@@ -124,6 +124,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/security-data-verify
 # 登录态验证（27 项断言：HttpOnly Cookie / CSRF 双提交 / 退出清理；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/auth-cookie-verify.ps1
 
+# 密钥轮换演练（28 项断言：换密钥→旧数据仍可读→重加密→去掉旧密钥仍可读→还原；会重启 5 次后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/crypto-rotate-verify.ps1
+
 # 商品域端到端（36 项断言）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1
 
@@ -174,6 +177,7 @@ prod 下的行为差异：
 - CORS 变成**显式白名单**（原来是通配来源 + 允许携带凭证，等于任意站点可带用户身份调后端）
 - **敏感数据在库里是加密的**：手机号、收货人、详细地址（含订单快照）都用 **AES-256-GCM** 字段级加密，enc:v1: 前缀标识密文；存量明文会在应用启动时自动补加密（幂等、双实例并发安全）。密码是 BCrypt，任何接口都不返回。scripts/security-data-verify.ps1 会用 34 项断言验证这件事（含「同一个手机号两行密文必须不同」）
 - **登录态在 HttpOnly Cookie 里**（`SameSite=Lax` + 前端 `X-CSRF-Token` 双提交校验），**localStorage 不存 token** —— XSS 读不到凭证；脚本/服务端仍可用 `Authorization: Bearer`，且不受 CSRF 影响
+- **PII 加密密钥支持轮换**：密文带 keyId（`enc:v1:<keyId>:<payload>`），轮换时把新密钥放进 `MALL_CRYPTO_SECRET`、旧密钥放进 `MALL_CRYPTO_PREVIOUS_SECRETS`（仅解密），再用 `MALL_CRYPTO_RE_ENCRYPT_ON_STARTUP=true` 重启一次把数据迁到新密钥，最后清掉旧密钥。`scripts/crypto-rotate-verify.ps1` 会把这条链路真跑一遍
 - **密码策略**：8-64 位且必须同时含字母和数字；超过 72 字节（BCrypt 的有效长度）直接拒绝
 - **传输加密**：容器只监听 80，HTTPS 需要在前面加一层 TLS 终止，模板见 deploy/nginx-tls.conf.example（含 HSTS / CSP / 安全响应头，**需在目标机验证**）
 - 登录有**失败次数限流**：同一用户名窗口内失败 5 次锁 5 分钟，锁定期间连正确密码也拒
