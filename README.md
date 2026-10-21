@@ -130,6 +130,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/crypto-rotate-verify
 # 令牌生命周期（26 项断言：access 5 秒真过期 / refresh 轮换 / 重放失败 / 登出吊销；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/token-lifecycle-verify.ps1
 
+# 部署验证（36 项：对着 docker 容器栈跑；需要先起 docker-compose.localtest.yml，见 docs）
+bash scripts/deploy-verify.sh
+
 # 商品域端到端（36 项断言）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p2-verify.ps1
 
@@ -166,9 +169,9 @@ node scripts/admin-crud-verify.mjs
 | `MALL_JWT_SECRET` | JWT 签名密钥，**两个后端必须一致**，至少 32 字符 |
 | `MALL_CRYPTO_SECRET` | 敏感字段（手机号/收货人/地址）加密密钥，两个后端一致、至少 32 字符，**必须与 JWT 密钥不同**。⚠️ 上线后不要随意更换，否则旧密文解不开 |
 | `MALL_COOKIE_SECURE` | 登录态 Cookie 是否只在 HTTPS 下发送。**prod 必须 `true`**（自检会拦），dev（http）必须 `false` |
+| `MALL_CORS_ALLOWED_ORIGINS` | 允许跨域调接口的来源（逗号分隔）。**prod 自检拒绝 `*`**；同源部署时 nginx 会去掉 Origin，这里主要给「其它域名直接打接口」用。默认值是 dev 的 5173/5174，上线必须改成真实域名 |
 | `MALL_DB_PASSWORD` | 数据库口令（两个后端一致） |
 | `MALL_DB_URL` / `MALL_DB_USERNAME` | 数据库连接（默认 localhost / root） |
-| `MALL_CORS_ALLOWED_ORIGINS` | 允许跨域的来源（逗号分隔）。**不能含 `*`**，prod 启动自检会直接拦下 |
 | `MALL_LOGIN_MAX_FAILURES` / `MALL_LOGIN_LOCK_SECONDS` | 登录失败限流（默认 5 次 / 300 秒） |
 
 prod 下的行为差异：

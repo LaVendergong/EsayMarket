@@ -1,0 +1,124 @@
+# ============================================================================
+# 本地"部署测试"用的 compose（**不是**生产部署文件）
+#
+# 用途：在开发机上把生产那份 docker-compose.yml 原样跑起来验证一遍
+#      （镜像构建、健康检查、initdb 迁移、prod profile 自检、nginx 反代、Cookie）。
+#
+# 为什么单独一份：开发机上 3306（本机 MySQL 服务）、8081/8090（本地 jar）、
+# 5173（可能被别的项目占着）通常已经被占用，直接 `docker compose up` 会端口冲突。
+# 这里把**宿主端口**全换成 1xxxx 段，容器内部端口不变，所以镜像与配置完全一致。
+#
+# 用法：
+#   cp .env.example .env    # 填三个必填密钥
+#   docker compose -p malltest -f docker-compose.localtest.yml up -d --build
+#   # H5  http://localhost:15174    后台 http://localhost:15173
+#   docker compose -p malltest -f docker-compose.localtest.yml down -v
+# ============================================================================
+
+name: malltest
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  mysql:
+    image: mysql:8.0
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: mall
+    ports:
+      - "13306:3306"
+    volumes:
+      - mysql-data-localtest:/var/lib/mysql
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+    logging: *default-logging
+
+  mall-admin:
+    build:
+      context: ./backend
+      args:
+        MODULE: mall-admin
+    image: mall/mall-admin:localtest
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      MALL_DB_URL: "jdbc:mysql://mysql:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false"
+      MALL_DB_USERNAME: root
+      MALL_DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MALL_JWT_SECRET: ${MALL_JWT_SECRET:?set MALL_JWT_SECRET in .env}
+      MALL_CRYPTO_SECRET: ${MALL_CRYPTO_SECRET:?set MALL_CRYPTO_SECRET in .env}
+      # 与生产一致：登录态 Cookie 只在 HTTPS 下发送（浏览器把 localhost 视为安全上下文，仍可用）
+      MALL_COOKIE_SECURE: "true"
+      # 本地部署测试：站点自己的来源（15173/15174）。同源请求由 nginx 去掉 Origin，这里主要给
+      # 「别的来源直接打接口」用；prod 自检会拒绝 *
+      MALL_CORS_ALLOWED_ORIGINS: ${MALL_CORS_ALLOWED_ORIGINS:-http://localhost:15173,http://localhost:15174}
+      MALL_ORDER_TIMEOUT_JOB_ENABLED: "true"
+    ports:
+      - "18081:8081"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+
+  mall-portal:
+    build:
+      context: ./backend
+      args:
+        MODULE: mall-portal
+    image: mall/mall-portal:localtest
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      MALL_DB_URL: "jdbc:mysql://mysql:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false"
+      MALL_DB_USERNAME: root
+      MALL_DB_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MALL_JWT_SECRET: ${MALL_JWT_SECRET:?set MALL_JWT_SECRET in .env}
+      MALL_CRYPTO_SECRET: ${MALL_CRYPTO_SECRET:?set MALL_CRYPTO_SECRET in .env}
+      MALL_COOKIE_SECURE: "true"
+      # 本地部署测试：站点自己的来源（15173/15174）。同源请求由 nginx 去掉 Origin，这里主要给
+      # 「别的来源直接打接口」用；prod 自检会拒绝 *
+      MALL_CORS_ALLOWED_ORIGINS: ${MALL_CORS_ALLOWED_ORIGINS:-http://localhost:15173,http://localhost:15174}
+    ports:
+      - "18090:8090"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+
+  admin-web:
+    build:
+      context: ./frontend/admin-web
+    image: mall/admin-web:localtest
+    ports:
+      - "15173:80"
+    depends_on:
+      - mall-admin
+    restart: unless-stopped
+    logging: *default-logging
+
+  portal-web:
+    build:
+      context: ./frontend/portal-web
+    image: mall/portal-web:localtest
+    ports:
+      - "15174:80"
+    depends_on:
+      - mall-portal
+    restart: unless-stopped
+    logging: *default-logging
+
+volumes:
+  mysql-data-localtest:

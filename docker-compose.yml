@@ -68,6 +68,9 @@ services:
       MALL_CRYPTO_SECRET: ${MALL_CRYPTO_SECRET:?set MALL_CRYPTO_SECRET in .env (see .env.example)}
       # 登录态 HttpOnly Cookie 只在 HTTPS 下发送。prod 必须 true（没有 TLS 就别上线）
       MALL_COOKIE_SECURE: "true"
+      # 允许跨域调接口的来源。同源部署时 nginx 会去掉 Origin，这里的值主要用于
+      # 「其它域名直接打接口」的场景；prod 自检会拒绝 *。改成你的真实域名。
+      MALL_CORS_ALLOWED_ORIGINS: ${MALL_CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:5174}
       # 超时关单定时任务只在 admin 开，避免两个应用重复扫同一批订单
       MALL_ORDER_TIMEOUT_JOB_ENABLED: "true"
     ports:
@@ -95,6 +98,9 @@ services:
       MALL_CRYPTO_SECRET: ${MALL_CRYPTO_SECRET:?set MALL_CRYPTO_SECRET in .env (see .env.example)}
       # 登录态 HttpOnly Cookie 只在 HTTPS 下发送。prod 必须 true（没有 TLS 就别上线）
       MALL_COOKIE_SECURE: "true"
+      # 允许跨域调接口的来源。同源部署时 nginx 会去掉 Origin，这里的值主要用于
+      # 「其它域名直接打接口」的场景；prod 自检会拒绝 *。改成你的真实域名。
+      MALL_CORS_ALLOWED_ORIGINS: ${MALL_CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:5174}
     ports:
       - "8090:8090"
     depends_on:

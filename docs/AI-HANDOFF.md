@@ -106,6 +106,8 @@ D:\projects\mall\
 │   ├── auth-cookie-verify.ps1    登录态验证（27 项断言：HttpOnly / SameSite / CSRF 双提交 / 退出清理 / 两应用隔离）
 │   ├── crypto-rotate-verify.ps1  密钥轮换演练（28 项断言：换密钥→旧数据仍可读→重加密→去掉旧密钥仍可读→还原）
 │   ├── token-lifecycle-verify.ps1 令牌生命周期（26 项断言：access 真过期 / refresh 轮换 / 重放失败 / 登出吊销）
+│   ├── deploy-verify.sh          部署验证（36 项：容器/迁移/prod 行为/Cookie/nginx/端到端；在容器栈上跑）
+│   ├── deploy-browser-check.mjs  部署后浏览器冒烟（8 项：UI 登录 + Secure Cookie 是否被浏览器接受）
 │   ├── backup-db.ps1             数据库逻辑备份（mysqldump 一致性快照，保留最近 N 份）
 │   ├── restore-db.ps1            从备份恢复（默认恢复到临时库，覆盖 mall 必须 -Force）
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
@@ -710,6 +712,19 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
     `.eq()` 是延迟解析的，所以「patch 实体 + 条件 wrapper」的写法在生产与单测里都能跑。
 63. **刷新失败时后端返回 HTTP 200 + `code=401`**（本项目统一约定），前端不能只按 HTTP 状态判断，
     要看业务码；反过来，`/auth/**` 必须排除在「401 自动刷新」逻辑之外，否则会自己刷自己。
+64. **同源部署下，浏览器对 POST 也会带 `Origin`，一样会撞 CORS**：nginx 既发静态文件又反代 `/api`，
+    请求本来是同源的，但 Spring 的 `CorsFilter` 看到 `Origin` 就按跨域处理，白名单里没有本站域名
+    → **403 `Invalid CORS request`**（登录直接挂，`curl` 不带 Origin 却是 200，很容易误判）。
+    修法：反代里 `proxy_set_header Origin "";`（同源请求不需要 CORS），
+    同时把 `MALL_CORS_ALLOWED_ORIGINS` 配成真实域名（给真正的跨域调用用）。
+65. **`.env` 用 Windows 换行会让 docker compose 的变量带上 `\r`**：密码/密钥多一个 CR 就认证失败，
+    而 `mysql` 客户端默认只报一句 warning，脚本里表现为**所有查询返回空**、看起来像"数据没建好"。
+    修法：读变量时 `tr -d '\r'`；或者用 LF 写 .env。
+66. **本机 docker 在 WSL 里时**：当前用户常常不在 `docker` 组（`/var/run/docker.sock` 无权限），
+    用 `wsl -u root -e docker ...` 绕过；Docker Hub 基本拉不动（会解析到 199.96.58.240 之类的黑洞 IP），
+    用 `docker.m.daocloud.io` 前缀拉取再 `docker tag` 成标准名字，compose 文件不用改。
+67. **不要在 `/mnt/d`（drvfs）里构建镜像**：npm/maven 在 9p 文件系统上容易出权限/符号链接问题，
+    先把仓库 `tar` 到 WSL 原生目录（排除 node_modules/target/.git）再 build，快且稳。
 38. **等「页面出现某段文字」还不够，要等「你要点的那个操作所需的数据」就绪**（§8 第 23 条的变体）：
     结算页 `load()` 是**先取地址、再取购物车清单**，地址卡片一出现测试就去点「提交订单」，
     而此时 `items` 还是空的 → `submit()` 直接 return（只弹个 toast），后端根本没收到请求。
@@ -865,6 +880,69 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 本地部署测试（Docker，`deploy-verify.sh` 36/36 + `deploy-browser-check.mjs` 8/8）
+
+**为什么单开一节**：单元测试和接口测试都是"对着源码跑"；这一节是"对着构建出来的镜像跑"。
+两者能发现的问题不一样 —— 这次就抓到一个**只在部署形态下才出现、会直接挡住上线**的 bug（见下）。
+
+**怎么跑**（本机 docker 在 WSL 里、且要 root；Docker Hub 被墙，用国内镜像源拉基础镜像再 retag）：
+
+```bash
+# 1) 拉基础镜像（docker.m.daocloud.io 可达；拉完 retag 成标准名字，compose 就不用改）
+docker pull docker.m.daocloud.io/library/mysql:8.0            && docker tag ... mysql:8.0
+docker pull docker.m.daocloud.io/library/maven:3.9-eclipse-temurin-17 && ...
+docker pull docker.m.daocloud.io/library/eclipse-temurin:17-jre && ...
+docker pull docker.m.daocloud.io/library/node:22-alpine        && ...
+docker pull docker.m.daocloud.io/library/nginx:1.27-alpine     && ...
+
+# 2) 拷到 WSL 原生文件系统再构建（/mnt/d 是 drvfs，npm/maven 在上面容易出权限/符号链接问题）
+tar -C /mnt/d/projects/mall --exclude=node_modules --exclude=target --exclude=.git \
+    --exclude=logs --exclude=tmp -cf - . | tar -C /root/mallbuild -xf -
+
+# 3) 起栈（宿主端口换成 1xxxx，避开本机已占用的 3306/8081/8090/5173）
+cd /root/mallbuild
+cp /mnt/d/projects/mall/.env.example .env      # 填三个密钥
+docker compose -p malltest -f docker-compose.localtest.yml up -d --build
+
+# 4) 验证
+bash scripts/deploy-verify.sh                                   # 36 项：容器/迁移/prod 行为/Cookie/nginx/端到端
+PORTAL_WEB=http://localhost:15174 PORTAL_API=http://localhost:18090 \
+  node scripts/deploy-browser-check.mjs                          # 8 项：真浏览器登录
+```
+
+产物：H5 `http://localhost:15174`、后台 `http://localhost:15173`。
+
+**验证覆盖**：
+
+| 分组 | 内容 |
+|---|---|
+| A 容器 | 5 个服务都在跑；mysql healthy 且是 8.0.46 |
+| B 迁移 | **全新数据卷**上 initdb 依次跑完 V1..V7：9 张表、`t_refresh_token` 存在、demo 数据 5 个商品、`t_address.phone` 已被 V6 加宽到 128 |
+| C prod 行为 | `health`=200、`prometheus`=200、`info`/`metrics`=404、`/v3/api-docs`=404、`/webjars/**`=404、无凭证=401、公共接口=200 |
+| D prod Cookie | `Secure` + `HttpOnly` + `SameSite=Lax` 三个标记齐全；access TTL **正好 900s**；refresh Cookie 也在 |
+| E nginx | 生产构建产物可访问；`nosniff`/`X-Frame-Options` 生效；`/api` 真反代到后端 |
+| F 端到端 | 注册→地址→下单在容器里跑通；订单快照在容器 DB 里是 `enc:v1:<kid>:` 密文；详情接口回明文；清理干净 |
+| 浏览器 | UI 登录成功、localStorage 无 token、JS 看不到登录 Cookie、**受保护接口能通**、控制台零报错 |
+
+> 最后那条「受保护接口能通」是这次部署测试最有价值的一条：prod 的 Cookie 带 `Secure`，
+> 本地没有 HTTPS，只有浏览器把 `localhost` 当安全上下文时才会发送它。curl 测不出这件事。
+
+**这次部署测试抓到并修掉的 bug（只在部署形态下出现）**：
+
+同源部署时，浏览器对 **POST 也会带 `Origin`**（fetch 规范），nginx 原样转发 → Spring 的
+`CorsFilter` 看到 Origin 就按跨域处理 → 白名单里只有 dev 的 5173/5174，于是**登录直接 403
+`Invalid CORS request`**。curl 复现：
+
+```
+no-origin   -> 200
+Origin: http://localhost:15174 -> 403 Invalid CORS request
+```
+
+修法两条一起（互相兜底）：
+1. 两个前端 `nginx.conf` 的 `location /api/` 里 `proxy_set_header Origin "";`
+   —— 同源请求本来就不该走 CORS（和 dev 的 vite 代理去掉 Origin 是同一个道理，§8 第 39 条）
+2. `docker-compose*.yml` 显式给 `MALL_CORS_ALLOWED_ORIGINS`（默认 dev 端口那套值不能带到线上）
 
 ### 令牌生命周期：15 分钟 access + 可吊销 refresh（`token-lifecycle-verify.ps1` 26/26）
 
@@ -1066,7 +1144,8 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 登录态改 HttpOnly Cookie + CSRF | ✅ | 见下方「登录态迁移」；`auth-cookie-verify.ps1` **27/27** |
 | PII 加密密钥轮换（双密钥 + 重加密） | ✅ | 见下方「密钥轮换」；`crypto-rotate-verify.ps1` **28/28** |
 | 令牌生命周期（短 access + 可吊销 refresh） | ✅ | 见下方「令牌生命周期」；`token-lifecycle-verify.ps1` **26/26** |
-| HTTPS 传输加密 | ⚠️ | 只给了模板 `deploy/nginx-tls.conf.example`，**本机无法验证**（无 nginx/证书），上线前必须在目标机跑 |
+| HTTPS 传输加密 | ⚠️ | 只给了模板 `deploy/nginx-tls.conf.example`，本机没有 nginx/证书无法验证；但**部署测试已确认 prod 的 Secure Cookie 与安全响应头在真实容器里生效** |
+| 本地部署测试（Docker） | ✅ | 见下方「本地部署测试」；`deploy-verify.sh` **36/36** + `deploy-browser-check.mjs` **8/8** |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）
