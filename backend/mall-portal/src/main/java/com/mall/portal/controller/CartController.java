@@ -55,6 +55,14 @@ public class CartController {
         return R.ok();
     }
 
+    /** 全选 / 取消全选：一次请求改完整个购物车（前端不再循环发 N 个请求） */
+    @Operation(summary = "全选/取消全选 checked=0|1")
+    @PutMapping("/checked")
+    public R<Void> updateAllChecked(@RequestParam Integer checked) {
+        cartService.updateAllChecked(UserContext.requireUserId(), checked);
+        return R.ok();
+    }
+
     @Operation(summary = "删除条目")
     @DeleteMapping("/{id}")
     public R<Void> remove(@PathVariable Long id) {

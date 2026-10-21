@@ -27,6 +27,8 @@ const detailText = computed(() => (product.value?.detail || '').replace(/<[^>]+>
 
 const price = computed(() => selected.value?.price ?? product.value?.price ?? 0)
 const maxQuantity = computed(() => Math.max(selected.value?.availableStock ?? 0, 1))
+/** 当前选中规格是否已售罄：售罄时按钮直接置灰，而不是点了才报错（主流电商都这么做） */
+const soldOut = computed(() => !selected.value || (selected.value.availableStock ?? 0) <= 0)
 
 function pickSku(sku: SkuVO) {
   if (sku.availableStock <= 0) {
@@ -151,8 +153,20 @@ onMounted(load)
     <!-- 注意：Vant 4 没有 goods-action，是 action-bar（GoodsAction 是 Vant 3 的旧组件） -->
     <van-action-bar v-if="product">
       <van-action-bar-icon icon="cart-o" text="购物车" :badge="cart.count.value || ''" @click="router.push('/cart')" />
-      <van-action-bar-button type="warning" text="加入购物车" :loading="submitting" @click="addToCart" />
-      <van-action-bar-button type="danger" text="立即购买" :loading="submitting" @click="buyNow" />
+      <van-action-bar-button
+        type="warning"
+        :text="soldOut ? '已售罄' : '加入购物车'"
+        :disabled="soldOut"
+        :loading="submitting"
+        @click="addToCart"
+      />
+      <van-action-bar-button
+        type="danger"
+        :text="soldOut ? '已售罄' : '立即购买'"
+        :disabled="soldOut"
+        :loading="submitting"
+        @click="buyNow"
+      />
     </van-action-bar>
   </div>
 </template>

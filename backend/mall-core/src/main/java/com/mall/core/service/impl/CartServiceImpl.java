@@ -154,6 +154,22 @@ public class CartServiceImpl implements CartService {
         cartMapper.updateById(upd);
     }
 
+    /**
+     * 全选 / 取消全选：一条 SQL 搞定。
+     *
+     * <p>之前前端是「循环挨个调 updateChecked」，购物车有 10 件就是 10 个请求，
+     * 点一下全选要等一圈网络往返，界面还会闪好几次。
+     */
+    @Override
+    public void updateAllChecked(Long userId, Integer checked) {
+        if (checked == null || (checked != 0 && checked != 1)) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED, "checked 只能是 0 或 1");
+        }
+        Cart patch = new Cart();
+        patch.setChecked(checked);
+        cartMapper.update(patch, Wrappers.<Cart>lambdaUpdate().eq(Cart::getUserId, userId));
+    }
+
     @Override
     public void remove(Long userId, Long id) {
         requireOwned(userId, id);

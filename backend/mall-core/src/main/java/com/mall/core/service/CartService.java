@@ -16,6 +16,9 @@ public interface CartService {
 
     void updateChecked(Long userId, Long id, Integer checked);
 
+    /** 全选 / 取消全选（一条 SQL，避免前端发 N 个请求） */
+    void updateAllChecked(Long userId, Integer checked);
+
     void remove(Long userId, Long id);
 
     /** 清空选中项（下单成功后也会调用） */

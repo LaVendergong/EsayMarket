@@ -51,6 +51,9 @@ export const cartApi = {
     http.put<never, void>(`/portal/cart/${id}`, null, { params: { quantity } }),
   updateChecked: (id: number, checked: number) =>
     http.put<never, void>(`/portal/cart/${id}/checked`, null, { params: { checked } }),
+  /** 全选 / 取消全选：一次请求（后端一条 SQL），不再循环发 N 次 */
+  updateAllChecked: (checked: number) =>
+    http.put<never, void>('/portal/cart/checked', null, { params: { checked } }),
   remove: (id: number) => http.delete<never, void>(`/portal/cart/${id}`),
   clearChecked: () => http.delete<never, void>('/portal/cart/checked')
 }

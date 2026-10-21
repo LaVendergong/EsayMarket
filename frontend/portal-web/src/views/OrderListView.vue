@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { showConfirmDialog, showSuccessToast } from 'vant'
-import { orderApi } from '@/api'
+import { showConfirmDialog, showSuccessToast, showToast } from 'vant'
+import { cartApi, orderApi } from '@/api'
+import { cart } from '@/stores/cart'
 import { ORDER_TABS, type OrderVO } from '@/types'
 import { money } from '@/utils/format'
 
@@ -40,6 +41,7 @@ function reload() {
   pageNum.value = 1
   list.value = []
   finished.value = false
+  expired.clear()
   loadPage()
 }
 
@@ -71,7 +73,88 @@ async function confirm(o: OrderVO) {
   reload()
 }
 
-onMounted(reload)
+/**
+ * 再次购买：把订单里的商品按原数量重新加进购物车。
+ *
+ * 逐条加（购物车接口是单品维度），任何一条失败都不中断其它条目 ——
+ * 常见情况是「其中某个 SKU 已下架」，这时给出提示但其余仍然加成功，
+ * 比整体失败让用户重新挑要好。
+ */
+async function rebuy(o: OrderVO) {
+  let added = 0
+  let failed = 0
+  for (const item of o.items) {
+    try {
+      await cartApi.add(item.skuId, item.quantity)
+      added += 1
+    } catch {
+      failed += 1
+    }
+  }
+  await cart.refresh()
+  if (!added) {
+    showToast('商品已下架，无法再次购买')
+    return
+  }
+  showSuccessToast(failed ? `已加入 ${added} 件，${failed} 件已下架` : '已加入购物车')
+  router.push('/cart')
+}
+
+// ---------------------------------------------------------------- 待支付倒计时
+/**
+ * 主流电商都会在"待支付"订单上显示剩余时间（我们后端本来就有 expireTime，
+ * 超时会由定时任务关单）。这里每秒刷新一次文本，**只在有未支付订单时才跑定时器**。
+ */
+const now = ref(Date.now())
+const expired = new Set<number>()
+let timer: number | undefined
+
+function stopTicker() {
+  if (timer) {
+    window.clearInterval(timer)
+    timer = undefined
+  }
+}
+
+function startTicker() {
+  if (timer) return
+  timer = window.setInterval(() => {
+    now.value = Date.now()
+    onTick()
+  }, 1000)
+}
+
+function remainMs(o: OrderVO): number {
+  if (!o.expireTime) return 0
+  return new Date(o.expireTime).getTime() - now.value
+}
+
+function remainText(o: OrderVO): string {
+  const ms = remainMs(o)
+  if (ms <= 0) return '已超时'
+  const total = Math.floor(ms / 1000)
+  const m = String(Math.floor(total / 60)).padStart(2, '0')
+  const s = String(total % 60).padStart(2, '0')
+  return `剩 ${m}:${s} 自动关闭`
+}
+
+/** 倒计时归零时刷新一次列表，让"已关闭"及时反映出来（每个订单只触发一次） */
+function onTick() {
+  for (const o of list.value) {
+    if (o.status === 0 && remainMs(o) <= 0 && !expired.has(o.id)) {
+      expired.add(o.id)
+      reload()
+      return
+    }
+  }
+}
+
+onMounted(() => {
+  reload()
+  startTicker()
+})
+
+onBeforeUnmount(stopTicker)
 </script>
 
 <template>
@@ -105,12 +188,19 @@ onMounted(reload)
             <div>{{ money(it.totalAmount) }}</div>
           </div>
 
+          <div v-if="o.status === 0 && o.expireTime" class="countdown">
+            {{ remainText(o) }}
+          </div>
+
           <div class="ofoot">
             <span>实付 <b class="price">{{ money(o.payAmount) }}</b></span>
             <div class="oacts" @click.stop>
               <van-button v-if="o.status === 0" size="small" plain round @click="cancel(o)">取消</van-button>
               <van-button v-if="o.status === 0" size="small" type="danger" round @click="pay(o)">去支付</van-button>
               <van-button v-if="o.status === 2" size="small" type="danger" round @click="confirm(o)">确认收货</van-button>
+              <van-button v-if="o.status === 3 || o.status === 4" size="small" plain round @click="rebuy(o)">
+                再次购买
+              </van-button>
             </div>
           </div>
         </div>
@@ -158,6 +248,12 @@ onMounted(reload)
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.countdown {
+  padding: 4px 0;
+  font-size: 12px;
+  color: #ff976a;
 }
 
 .ofoot {

@@ -312,7 +312,10 @@ try {
   // ================================================================ 后台：发货
   log('')
   log('--- 管理后台：发货 ---')
-  await goto(`${ADMIN_WEB}/`, 1500)
+  // 先落在**登录页**再注入 token：直接进 "/" 会先按默认路由发一次请求，
+  // 而那时 localStorage 里可能还留着上一轮的 token（access 只有 15 分钟，很容易已过期），
+  // 就会冒一条 401 噪声，把「零控制台告警」的断言打红（偶发，取决于上一轮残留）。
+  await goto(`${ADMIN_WEB}/#/login`, 1500)
   await setStorage({ mall_admin_token: adminToken, mall_admin_user: JSON.stringify(adminLogin.data) })
   await goto(`${ADMIN_WEB}/?flow=1#/order`, 4000)
   const sawOrderRow = await waitFor(pageHas(orderNo), 8000)
@@ -404,6 +407,21 @@ try {
   // 上一段「立即购买」留下的就是待支付订单，正好用来测取消：
   // 取消要过二次确认，成功后状态变已关闭，并且**释放**它锁定的库存
   const lockBefore = sql(`SELECT IFNULL(locked_stock,0) FROM t_sku WHERE product_id = ${prodId};`)
+  // 待支付订单在列表里要有倒计时（主流电商标配；到点由后端定时任务关单）
+  await goto(PORTAL_WEB + '/?r=20#/orders', 3500)
+  const pendingListText = await innerText()
+  check(
+    '订单列表：待支付订单显示倒计时',
+    pendingListText.includes('剩 ') && pendingListText.includes('自动关闭'),
+    'containsCountdown=' + pendingListText.includes('剩 ')
+  )
+  // 按**卡片**判断：列表里其它「已完成」订单本来就该有「再次购买」，拿整页文本判断会误报
+  const pendingCardRebuy = await evalJs(
+    '(() => { const rows = [...document.querySelectorAll(".order")]; const row = rows.find(r => (r.innerText || "").includes("待支付")); if (!row) return "no-row"; return (row.innerText || "").includes("再次购买") ? "has" : "none"; })()'
+  )
+  check('订单列表：待支付订单卡片不显示「再次购买」', pendingCardRebuy === 'none', 'card=' + pendingCardRebuy)
+  await goto(PORTAL_WEB + '/?r=21#/order/' + directOrderId, 3000)
+  await waitSel('.footer .van-button')
   await waitSel('.footer .van-button')
   await clickText('.footer .van-button', '取消订单')
   const cancelDialog = await waitFor(`!!document.querySelector('.van-dialog__confirm')`, 5000)
@@ -423,6 +441,34 @@ try {
     Number(lockBefore) - Number(lockAfter) === 2,
     `locked ${lockBefore} -> ${lockAfter}（期望差 2）`
   )
+
+  // 已关闭的订单要能「再次购买」：一键把商品加回购物车
+  await goto(PORTAL_WEB + '/?r=22#/orders', 3500)
+  const closedListText = await innerText()
+  check('已关闭订单显示「再次购买」', closedListText.includes('再次购买'), 'len=' + closedListText.length)
+  await clickText('.order .van-button', '再次购买')
+  const backToCart = await waitFor(onRoute('cart'), 8000)
+  const cartAfterRebuy = await innerText()
+  check(
+    '再次购买把商品加回购物车',
+    backToCart && cartAfterRebuy.includes(ITEM),
+    'hash=' + (await evalJs('location.hash')) + ' containsItem=' + cartAfterRebuy.includes(ITEM)
+  )
+
+  // 售罄商品：按钮要置灰并显示「已售罄」，而不是点了才报错
+  const skuStock = sql('SELECT stock FROM t_sku WHERE product_id = ' + prodId + ' LIMIT 1;')
+  sql('UPDATE t_sku SET stock = 0 WHERE product_id = ' + prodId + ';')
+  await goto(PORTAL_WEB + '/?r=23#/product/' + prodId, 3500)
+  const soldOutText = await innerText()
+  const soldOutButtons = await evalJs(
+    '(() => { const bs = [...document.querySelectorAll(".van-action-bar-button")]; return bs.length + "|" + bs.filter(b => b.disabled).length; })()'
+  )
+  check(
+    '售罄商品：按钮显示「已售罄」且全部禁用',
+    soldOutText.includes('已售罄') && soldOutButtons === '2|2',
+    'text=' + soldOutText.includes('已售罄') + ' buttons=' + soldOutButtons + '（期望 2|2）'
+  )
+  sql('UPDATE t_sku SET stock = ' + skuStock + ' WHERE product_id = ' + prodId + ';')
 
   // ================================================================ 收尾核对
   log('')

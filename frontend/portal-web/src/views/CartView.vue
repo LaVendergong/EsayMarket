@@ -12,36 +12,82 @@ const list = ref<CartVO[]>([])
 const loading = ref(false)
 
 const validList = computed(() => list.value.filter((c) => c.valid))
+const invalidList = computed(() => list.value.filter((c) => !c.valid))
 const checkedList = computed(() => list.value.filter((c) => c.valid && c.checked === 1))
 const allChecked = computed(() => validList.value.length > 0 && checkedList.value.length === validList.value.length)
 const total = computed(() => checkedList.value.reduce((s, c) => s + Number(c.totalPrice || 0), 0))
 
-async function load() {
-  loading.value = true
+/**
+ * 只在「首次进入 / 需要回滚」时整页拉取。
+ *
+ * 勾选、改数量、删除**都不再重新拉取**：先改本地数据（立即生效），再静默同步服务端。
+ * 老实现每次都 `await load()`，点一下 checkbox 整个列表闪一次，是"不丝滑"的主要来源。
+ */
+async function load(showLoading = true) {
+  if (showLoading) loading.value = true
   try {
     list.value = await cartApi.list()
-    await cart.refresh()
+    cart.sync(list.value)
   } finally {
     loading.value = false
   }
 }
 
 async function toggleCheck(c: CartVO, value: boolean) {
-  await cartApi.updateChecked(c.id, value ? 1 : 0)
-  await load()
-}
-
-async function toggleAll(value: boolean) {
-  for (const c of validList.value) {
-    const want = value ? 1 : 0
-    if (c.checked !== want) await cartApi.updateChecked(c.id, want)
+  const prev = c.checked
+  c.checked = value ? 1 : 0
+  cart.sync(list.value)
+  try {
+    await cartApi.updateChecked(c.id, value ? 1 : 0)
+  } catch {
+    c.checked = prev // 回滚（拦截器已提示）
+    cart.sync(list.value)
   }
-  await load()
 }
 
-async function changeQuantity(c: CartVO, value: number | string) {
-  await cartApi.updateQuantity(c.id, Number(value))
-  await load()
+/** 全选：一条请求改完，不再循环发 N 次 */
+async function toggleAll(value: boolean) {
+  const prev = validList.value.map((c) => c.checked)
+  for (const c of validList.value) c.checked = value ? 1 : 0
+  cart.sync(list.value)
+  try {
+    await cartApi.updateAllChecked(value ? 1 : 0)
+  } catch {
+    validList.value.forEach((c, i) => (c.checked = prev[i]))
+    cart.sync(list.value)
+  }
+}
+
+/**
+ * 步进器连点会打出请求风暴：按条目做 350ms 防抖，只把**最后一次**数量发出去。
+ * 期间界面已经是新数量（乐观更新），所以用户感觉是"跟着手指走"。
+ */
+const qtyTimers = new Map<number, number>()
+
+function changeQuantity(c: CartVO, value: number | string) {
+  const qty = Math.max(1, Number(value) || 1)
+  const prevQty = c.quantity
+  const prevTotal = c.totalPrice
+  c.quantity = qty
+  c.totalPrice = Number((Number(c.price) * qty).toFixed(2))
+  cart.sync(list.value)
+
+  const running = qtyTimers.get(c.id)
+  if (running) window.clearTimeout(running)
+  qtyTimers.set(
+    c.id,
+    window.setTimeout(async () => {
+      qtyTimers.delete(c.id)
+      try {
+        await cartApi.updateQuantity(c.id, qty)
+      } catch {
+        c.quantity = prevQty
+        c.totalPrice = prevTotal
+        cart.sync(list.value)
+        await load(false)
+      }
+    }, 350)
+  )
 }
 
 async function removeItem(c: CartVO) {
@@ -50,9 +96,15 @@ async function removeItem(c: CartVO) {
   } catch {
     return
   }
-  await cartApi.remove(c.id)
-  showSuccessToast('已移除')
-  await load()
+  const index = list.value.findIndex((x) => x.id === c.id)
+  if (index >= 0) list.value.splice(index, 1)
+  cart.sync(list.value)
+  try {
+    await cartApi.remove(c.id)
+    showSuccessToast('已移除')
+  } catch {
+    await load(false)
+  }
 }
 
 async function clearChecked() {
@@ -61,11 +113,39 @@ async function clearChecked() {
   } catch {
     return
   }
-  await cartApi.clearChecked()
-  await load()
+  const removed = new Set(checkedList.value.map((c) => c.id))
+  list.value = list.value.filter((c) => !removed.has(c.id))
+  cart.sync(list.value)
+  try {
+    await cartApi.clearChecked()
+  } catch {
+    await load(false)
+  }
 }
 
-onMounted(load)
+/** 一键清理失效商品（下架/无货），省得用户一条条划走 */
+async function clearInvalid() {
+  const invalids = invalidList.value
+  if (!invalids.length) return
+  const removed = new Set(invalids.map((c) => c.id))
+  list.value = list.value.filter((c) => !removed.has(c.id))
+  cart.sync(list.value)
+  for (const c of invalids) {
+    try {
+      await cartApi.remove(c.id)
+    } catch {
+      /* 单条失败不影响其它 */
+    }
+  }
+  showSuccessToast('已清理失效商品')
+}
+
+function goCheckout() {
+  if (!checkedList.value.length) return
+  router.push('/checkout')
+}
+
+onMounted(() => load())
 </script>
 
 <template>
@@ -75,6 +155,11 @@ onMounted(load)
         <span v-if="checkedList.length" class="clear" @click="clearChecked">清空选中</span>
       </template>
     </van-nav-bar>
+
+    <div v-if="invalidList.length" class="invalid-bar">
+      <span class="muted">{{ invalidList.length }} 件商品已失效</span>
+      <span class="link" @click="clearInvalid">清空失效商品</span>
+    </div>
 
     <van-loading v-if="loading && !list.length" class="loading" />
 
@@ -125,7 +210,7 @@ onMounted(load)
       button-text="去结算"
       :disabled="!checkedList.length"
       class="bar"
-      @submit="router.push('/checkout')"
+      @submit="goCheckout"
     >
       <template #tip>
         <div class="tip">
@@ -172,6 +257,19 @@ onMounted(load)
 .clear {
   color: #ee0a24;
   font-size: 14px;
+}
+
+.invalid-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #fff8e6;
+  font-size: 12px;
+}
+
+.link {
+  color: #ee0a24;
 }
 
 .tip {

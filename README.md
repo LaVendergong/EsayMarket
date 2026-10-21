@@ -142,7 +142,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p3-verify.ps1
 # 前端页面渲染检查（24 项断言 + 控制台告警零容忍；需要 Chrome + 前后端都已启动）
 node scripts/web-check.mjs
 
-# 前端全流程交互测试（41 项断言：真点按钮跑完整个购物闭环，含「立即购买」「取消订单」与「登录后不落 token」）
+# 前端全流程交互测试（46 项断言：真点按钮跑完整个购物闭环，含「立即购买」「取消订单」「待支付倒计时」「再次购买」「售罄置灰」）
 node scripts/web-flow.mjs
 
 # 管理后台 UI CRUD（16 项断言：分类增删改禁用 / 商品新增-下架-删除）
