@@ -113,7 +113,7 @@ D:\projects\mall\
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
 │   ├── metrics-verify.ps1        监控验证（16 项断言：prometheus 端点 + 业务计数器真的会动）
 │   ├── admin-crud-verify.mjs     后台分类/商品的 **UI** CRUD 验证（16 项断言）
-│   ├── after-sale-verify.ps1     售后 + 退款（52 项断言：状态机/库存语义/渠道退款/重试幂等/失败路径/越权）
+│   ├── after-sale-verify.ps1     售后 + 退款（57 项断言：状态机/渠道退款/重试幂等/失败路径/状态收敛/越权）
 │   ├── payment-verify.ps1        支付链路（34 项断言：支付单/渠道/幂等/回调验签/越权）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
@@ -767,7 +767,14 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
     抛异常后客服看不到任何失败原因。正确顺序：先调渠道（不在事务里）→ 记录结果 →
     再用 `TransactionTemplate` 包住"售后单 + 订单 + 库存"那几步。
 86. **先退钱再改状态**，不要先标"已退款"再调渠道：后者一旦渠道失败，用户看到已退款却没收到钱，
-    这是资金差错而不是体验问题。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+    这是资金差错而不是体验问题。87. **定时任务会被两个后端各扫一遍**（`scanBasePackages = "com.mall"`）：不加限制就是双份执行。
+    用 `@ConditionalOnProperty` 只在一个应用开（本项目 portal 开、admin 关），订单超时任务也是这个套路。
+88. **微信的退款通知字段是 `refund_status`，不是支付通知的 `trade_state`**；取值 `SUCCESS / ABNORMAL / CLOSED`。
+    拿支付通知的字段去解析退款通知，会一直判成"未成功"而且不报错。
+89. **对账任务的「执行间隔」和「判定陈旧的时间」要分开**：间隔 5 分钟、但只查 5 分钟没动过的单。
+    合成一个值会导致刚发起就查，把渠道正常处理中的单误判成异常。
+90. **`@Scheduled` 方法必须自己 try/catch**：异常抛出去会被调度器吞掉并可能停止后续调度，
+    表现为"任务只跑了一次就再也不动了"，而且日志里几乎没有痕迹。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -928,6 +935,48 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 退款状态收敛：通知 + 主动查单（`after-sale-verify.ps1` 57/57）
+
+上一节做完了「退款打到渠道」，但留下一个洞：**微信退款可能只返回 `PROCESSING`（已受理未到账），
+而退款通知会丢**（网络抖动、回调地址配错、服务正好在重启）。只靠通知的话，这笔单会永远停在
+「退款中」——用户看不到钱，客服也不知道该不该重试。
+
+#### 三条收敛路径
+
+| 路径 | 触发方 | 说明 |
+|---|---|---|
+| 退款异步通知 | 渠道 → `POST /portal/pay/refund-notify/{channel}` | 微信 `REFUND.SUCCESS / ABNORMAL / CLOSED`；**支付宝退款是同步接口，没有独立退款通知** |
+| 定时对账 | `RefundReconcileTask`（每 5 分钟） | 捞「退款中且 5 分钟没动」的单，主动查一次渠道 |
+| 人工查单 | 后台 `POST /admin/after-sale/{id}/query-refund` | 用户打电话过来说没收到钱时，先查真实状态 |
+
+三条路径最终都走同一个落库方法，且用**带条件的 UPDATE**（`WHERE refund_status=1`）：
+通知和定时任务同时到达时只有一次生效。
+
+#### 两个容易写错的点
+
+1. **退款通知的字段是 `refund_status`，不是支付通知的 `trade_state`** —— 用错会永远判不出成功
+2. **定时任务的「执行间隔」和「判定陈旧的时间」必须分开**：间隔 5 分钟、但只查 5 分钟没动过的单。
+   混成一个阈值的话，刚发起就去查，渠道还在正常处理，会被误判成异常
+
+#### `ABNORMAL / CLOSED` 怎么处理
+
+标成 `refund_status=3`（退款失败）+ 原因落库，**售后单仍然是「已同意」**。
+这是刻意的：商家确实同意了，差的是钱；把它退回「待处理」会让用户以为申请被驳回，客服也会重复处理。
+
+#### 验证（57/57，节选）
+
+```
+[PASS] I1 manual refund query converges PROCESSING -> SUCCESS (2)
+[PASS] I2 db reflects the converged status :: row=2|set
+[PASS] I3 querying again is idempotent (still SUCCESS)
+[PASS] I4 refund notify rejected without platform cert (4001/4005)
+[PASS] I5 mock channel has no refund notify (rejected, not silent 200)
+```
+
+> 定时任务只在一个应用里跑：两个后端都会扫描 `com.mall`，所以用
+> `@ConditionalOnProperty(mall.pay.refund-reconcile.enabled)`，portal 为 true、admin 为 false。
+> 订单超时关单任务也是这个套路。
 
 ### 退款真正打到渠道（`after-sale-verify.ps1` 52/52）
 
@@ -1459,6 +1508,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 售后（退款 / 退货退款） | ✅ | 见下方「售后」；`after-sale-verify.ps1` **44/44** + UI 11 条 |
 | 支付（收银台 / 支付单 / 三渠道） | ✅ | 见下方「支付」；`payment-verify.ps1` **34/34** + UI 6 条 |
 | 退款打到渠道 | ✅ | 见下方「退款真正打到渠道」；`after-sale-verify.ps1` **52/52**（含失败路径） |
+| 退款状态收敛（通知 + 查单） | ✅ | 见下方「退款状态收敛」；`after-sale-verify.ps1` **57/57** |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）

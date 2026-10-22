@@ -35,4 +35,13 @@ public interface PaymentService {
      */
     com.mall.core.pay.PayModels.RefundResult refund(Long orderId, String refundNo,
                                                    java.math.BigDecimal amount, String reason);
+
+    /** 渠道退款结果通知：验签 -> 把「退款中」推进到「退款成功 / 退款异常」 */
+    void handleRefundNotify(String channelCode, Map<String, String> params, String body, Map<String, String> headers);
+
+    /** 主动查一次退款单（后台手动触发），返回查完之后的退款状态码 */
+    int queryRefund(Long afterSaleId);
+
+    /** 扫描「退款中」的售后单主动查询收敛（定时任务用），返回处理条数 */
+    int reconcileProcessingRefunds(int limit);
 }

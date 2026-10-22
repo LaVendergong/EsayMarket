@@ -192,6 +192,69 @@ public class AlipayWapChannel implements PaymentChannel {
     }
 
     /**
+     * 主动查退款单（alipay.trade.fastpay.refund.query）。
+     *
+     * <p>对账兜底用：退款通知丢了、或者上一轮只拿到"已受理"，定时任务靠它把状态收敛掉。
+     * 支付宝这个接口返回 {@code refund_status=REFUND_SUCCESS} 才代表钱真到了。
+     */
+    @Override
+    public PayModels.RefundNotifyResult queryRefund(PayModels.RefundQuery query) {
+        PayProperties.Alipay cfg = properties.getAlipay();
+        if (!available()) {
+            throw new BusinessException(ResultCode.PAY_CHANNEL_UNAVAILABLE, "支付宝渠道未配置");
+        }
+        Map<String, String> params = new TreeMap<>();
+        params.put("app_id", cfg.getAppId());
+        params.put("method", "alipay.trade.fastpay.refund.query");
+        params.put("format", "JSON");
+        params.put("charset", "utf-8");
+        params.put("sign_type", "RSA2");
+        params.put("timestamp", TS.format(LocalDateTime.now()));
+        params.put("version", "1.0");
+
+        Map<String, Object> biz = new LinkedHashMap<>();
+        biz.put("out_trade_no", query.getPaymentNo());
+        biz.put("out_request_no", query.getRefundNo());
+        try {
+            params.put("biz_content", JSON.writeValueAsString(biz));
+        } catch (Exception e) {
+            throw new BusinessException(ResultCode.FAILED, "退款查询参数序列化失败");
+        }
+        params.put("sign", RsaSigner.sign(signContent(params), cfg.getPrivateKey()));
+
+        String form = params.entrySet().stream()
+                .map(e -> encode(e.getKey()) + "=" + encode(e.getValue()))
+                .collect(Collectors.joining("&"));
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(cfg.getGateway()))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("Content-Type", "application/x-www-form-urlencoded;charset=utf-8")
+                    .POST(HttpRequest.BodyPublishers.ofString(form, StandardCharsets.UTF_8))
+                    .build();
+            String body = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).body();
+            var node = JSON.readTree(body).path("alipay_trade_fastpay_refund_query_response");
+            if (!"10000".equals(node.path("code").asText(""))) {
+                throw new BusinessException(ResultCode.REFUND_FAILED,
+                        "支付宝退款查询失败：" + node.path("sub_msg").asText(""));
+            }
+            // 支付宝只在真的退成功时才返回 REFUND_SUCCESS，其余情况该字段为空
+            String refundStatus = node.path("refund_status").asText("");
+            return PayModels.RefundNotifyResult.builder()
+                    .refundNo(query.getRefundNo())
+                    .channelRefundNo(node.path("trade_no").asText(null))
+                    .status("REFUND_SUCCESS".equals(refundStatus) ? "SUCCESS" : "PROCESSING")
+                    .raw(body)
+                    .build();
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[pay] alipay refund query error: {}", e.toString());
+            throw new BusinessException(ResultCode.REFUND_FAILED, "支付宝退款查询请求失败");
+        }
+    }
+
+    /**
      * 构造 alipay.trade.refund 的全部请求参数（含签名）。
      *
      * <p>抽成包级方法是为了**能单测**：不联调也能验证"待签名串拼法 + RSA2 签名"是对的。

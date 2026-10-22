@@ -5,11 +5,14 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mall.common.exception.BusinessException;
 import com.mall.common.result.ResultCode;
+import com.mall.core.entity.AfterSale;
 import com.mall.core.entity.Order;
 import com.mall.core.entity.Payment;
 import com.mall.core.enums.OrderStatus;
 import com.mall.core.enums.PayChannel;
 import com.mall.core.enums.PaymentStatus;
+import com.mall.core.enums.RefundStatus;
+import com.mall.core.mapper.AfterSaleMapper;
 import com.mall.core.mapper.OrderMapper;
 import com.mall.core.mapper.PaymentMapper;
 import com.mall.core.pay.PayModels;
@@ -57,6 +60,7 @@ public class PaymentServiceImpl implements PaymentService {
     private final OrderMapper orderMapper;
     private final OrderService orderService;
     private final PayProperties payProperties;
+    private final AfterSaleMapper afterSaleMapper;
     /** code -> 渠道实现，Spring 自动注入全部实现 */
     private final Map<String, PaymentChannel> channels;
 
@@ -64,11 +68,13 @@ public class PaymentServiceImpl implements PaymentService {
                               OrderMapper orderMapper,
                               OrderService orderService,
                               PayProperties payProperties,
+                              AfterSaleMapper afterSaleMapper,
                               List<PaymentChannel> channelList) {
         this.paymentMapper = paymentMapper;
         this.orderMapper = orderMapper;
         this.orderService = orderService;
         this.payProperties = payProperties;
+        this.afterSaleMapper = afterSaleMapper;
         this.channels = channelList.stream()
                 .collect(Collectors.toMap(c -> c.channel().getCode(), Function.identity()));
     }
@@ -230,6 +236,128 @@ public class PaymentServiceImpl implements PaymentService {
         log.info("[pay] refund orderNo={} paymentNo={} refundNo={} amount={} channel={} success={} pending={}",
                 p.getOrderNo(), p.getPaymentNo(), refundNo, amount, p.getChannel(), result.isSuccess(), result.isPending());
         return result;
+    }
+
+    /**
+     * 渠道退款结果通知。
+     *
+     * <p>只处理「退款中 -> 成功/异常」。已经是成功/失败的单直接忽略（重复通知）。
+     */
+    @Override
+    @Transactional
+    public void handleRefundNotify(String channelCode, Map<String, String> params, String body, Map<String, String> headers) {
+        PayChannel payChannel = PayChannel.of(channelCode);
+        PaymentChannel impl = payChannel == null ? null : channels.get(payChannel.getCode());
+        if (impl == null) {
+            throw new BusinessException(ResultCode.PAY_CHANNEL_UNAVAILABLE, "未知的支付渠道");
+        }
+        PayModels.RefundNotifyResult r = impl.parseRefundNotify(params, body, headers);
+        if (r.getRefundNo() == null || r.getRefundNo().isBlank()) {
+            throw new BusinessException(ResultCode.PAY_NOTIFY_INVALID, "退款通知缺少商户退款单号");
+        }
+        AfterSale as = afterSaleMapper.selectOne(Wrappers.<AfterSale>lambdaQuery()
+                .eq(AfterSale::getRefundNo, r.getRefundNo())
+                .last("LIMIT 1"));
+        if (as == null) {
+            throw new BusinessException(ResultCode.AFTER_SALE_NOT_FOUND, "退款通知对应的售后单不存在");
+        }
+        applyRefundResult(as, r);
+    }
+
+    @Override
+    public int queryRefund(Long afterSaleId) {
+        AfterSale as = afterSaleMapper.selectById(afterSaleId);
+        if (as == null) {
+            throw new BusinessException(ResultCode.AFTER_SALE_NOT_FOUND);
+        }
+        refreshRefund(as);
+        AfterSale after = afterSaleMapper.selectById(afterSaleId);
+        return after == null || after.getRefundStatus() == null ? 0 : after.getRefundStatus();
+    }
+
+    /**
+     * 对账兜底：退款通知会丢（网络、回调地址配错、服务重启），只靠通知「退款中」会永远停住。
+     *
+     * <p>只捞「退款中且 5 分钟没动过」的单，避免刚发起就查、把正常处理中的单刷成异常。
+     */
+    @Override
+    public int reconcileProcessingRefunds(int limit) {
+        List<AfterSale> pending = afterSaleMapper.selectList(Wrappers.<AfterSale>lambdaQuery()
+                .eq(AfterSale::getRefundStatus, RefundStatus.PROCESSING.getCode())
+                .isNotNull(AfterSale::getRefundNo)
+                .lt(AfterSale::getUpdateTime, LocalDateTime.now().minusMinutes(5))
+                .orderByAsc(AfterSale::getId)
+                .last("LIMIT " + Math.max(1, limit)));
+        int changed = 0;
+        for (AfterSale as : pending) {
+            try {
+                if (refreshRefund(as)) {
+                    changed += 1;
+                }
+            } catch (Exception e) {
+                // 单条失败不能中断整批（渠道临时不可用很常见）
+                log.warn("[pay] refund reconcile failed no={} err={}", as.getAfterSaleNo(), e.toString());
+            }
+        }
+        if (changed > 0) {
+            log.info("[pay] refund reconcile updated {} of {} processing refunds", changed, pending.size());
+        }
+        return changed;
+    }
+
+    /** 查一次渠道并落库；返回状态是否发生了变化 */
+    private boolean refreshRefund(AfterSale as) {
+        if (as.getRefundNo() == null || as.getRefundNo().isBlank()) {
+            throw new BusinessException(ResultCode.REFUND_NOT_SUPPORTED, "该售后单没有退款单号，无法查询");
+        }
+        Payment p = paymentMapper.selectOne(Wrappers.<Payment>lambdaQuery()
+                .eq(Payment::getOrderId, as.getOrderId())
+                .eq(Payment::getStatus, PaymentStatus.PAID.getCode())
+                .orderByDesc(Payment::getId)
+                .last("LIMIT 1"));
+        String code = as.getRefundChannel() != null ? as.getRefundChannel() : (p == null ? null : p.getChannel());
+        PaymentChannel impl = code == null ? null : channels.get(code);
+        if (impl == null || !impl.available()) {
+            throw new BusinessException(ResultCode.REFUND_NOT_SUPPORTED, "原支付渠道不可用，无法查询退款");
+        }
+        PayModels.RefundNotifyResult r = impl.queryRefund(PayModels.RefundQuery.builder()
+                .paymentNo(p == null ? null : p.getPaymentNo())
+                .refundNo(as.getRefundNo())
+                .build());
+        return applyRefundResult(as, r);
+    }
+
+    /**
+     * 把渠道给的退款结果落到售后单上。
+     *
+     * <p>只更新「退款中」的单（条件 UPDATE）：并发通知 + 定时任务同时到达时只会有一次生效。
+     */
+    private boolean applyRefundResult(AfterSale as, PayModels.RefundNotifyResult r) {
+        if (r.getRefundNo() != null && !r.getRefundNo().equals(as.getRefundNo())) {
+            throw new BusinessException(ResultCode.PAY_NOTIFY_INVALID, "退款单号与售后单不匹配");
+        }
+        if (!r.isSuccess() && !r.isFailed()) {
+            // PROCESSING：渠道还在处理，什么都不改
+            return false;
+        }
+        AfterSale patch = new AfterSale();
+        if (r.isSuccess()) {
+            patch.setRefundStatus(RefundStatus.SUCCESS.getCode());
+            patch.setRefundTime(LocalDateTime.now());
+            patch.setRefundError(null);
+        } else {
+            // ABNORMAL / CLOSED：钱没退成，标成失败等人工介入（售后单仍是"已同意"，差的是钱）
+            patch.setRefundStatus(RefundStatus.FAILED.getCode());
+            patch.setRefundError("渠道退款异常（" + r.getStatus() + "），需人工处理");
+        }
+        int n = afterSaleMapper.update(patch, Wrappers.<AfterSale>lambdaUpdate()
+                .eq(AfterSale::getId, as.getId())
+                .eq(AfterSale::getRefundStatus, RefundStatus.PROCESSING.getCode()));
+        if (n > 0) {
+            log.info("[pay] refund status updated no={} -> {} (channel={})",
+                    as.getAfterSaleNo(), patch.getRefundStatus(), r.getStatus());
+        }
+        return n > 0;
     }
 
     @Override

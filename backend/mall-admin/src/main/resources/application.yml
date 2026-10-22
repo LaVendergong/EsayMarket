@@ -92,6 +92,10 @@ mall:
       api-base: ${MALL_PAY_WECHAT_API_BASE:https://api.mch.weixin.qq.com}
       notify-url: ${MALL_PAY_WECHAT_NOTIFY_URL:}
       allow-unverified-notify: ${MALL_PAY_WECHAT_ALLOW_UNVERIFIED_NOTIFY:false}
+    # 退款对账兜底：定期查「退款中」的单（两个应用都会扫描，只在一个应用开，避免重复执行）
+    refund-reconcile:
+      enabled: ${MALL_PAY_REFUND_RECONCILE_ENABLED:false}
+      interval-millis: ${MALL_PAY_REFUND_RECONCILE_INTERVAL_MILLIS:300000}
 
 # 日志只打 stdout，格式在 backend/mall-core/src/main/resources/logback-spring.xml 里；
 # 目录/轮转交给运行环境（docker 的 json-file 上限见 docker-compose.yml，裸机交给 logrotate）。

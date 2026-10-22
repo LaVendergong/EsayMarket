@@ -63,6 +63,26 @@ public class PaymentController {
     }
 
     /**
+     * 退款结果异步通知（微信 REFUND.SUCCESS / ABNORMAL / CLOSED）。
+     *
+     * <p>和支付回调一样必须匿名可达，安全性靠验签 + 报文解密。
+     * 支付宝的退款是同步接口、没有独立退款通知，所以走主动查单（后台/定时任务）。
+     */
+    @Operation(summary = "退款渠道异步回调")
+    @PostMapping("/pay/refund-notify/{channel}")
+    public String refundNotify(@PathVariable String channel,
+                               HttpServletRequest request,
+                               @RequestBody(required = false) String body) {
+        Map<String, String> params = new HashMap<>();
+        request.getParameterMap().forEach((k, v) -> params.put(k, v.length > 0 ? v[0] : ""));
+        Map<String, String> headers = new HashMap<>();
+        request.getHeaderNames().asIterator().forEachRemaining(h -> headers.put(h, request.getHeader(h)));
+
+        paymentService.handleRefundNotify(channel, params, body == null ? "" : body, headers);
+        return "{\"code\":\"SUCCESS\",\"message\":\"OK\"}";
+    }
+
+    /**
      * 支付渠道异步回调。
      *
      * <p>这个路径**必须放行匿名访问**（渠道服务器不会带我们的 token），安全性完全依赖

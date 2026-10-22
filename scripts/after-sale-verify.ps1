@@ -267,6 +267,29 @@ $failErr = Sql "SELECT IFNULL(refund_error,'-') FROM t_after_sale WHERE id = $as
 Check 'H4 failure reason is recorded for the agent' ($failErr.Length -gt 1) "refundError=$failErr"
 Check 'H5 order stays in AFTER_SALE(5) on failure (not refunded)' ((Sql "SELECT status FROM t_order WHERE id = $orderFail;") -eq '5') "status=$(Sql "SELECT status FROM t_order WHERE id = $orderFail;")"
 
+# ============================================================ I) 退款状态收敛
+Write-Host ''
+Write-Host '== I) refund status convergence =='
+# 模拟「渠道已受理但还没到账」：把已成功的单手动改成退款中，再用后台查单接口收敛。
+# 真实场景就是微信返回 PROCESSING、或者退款通知丢了。
+Sql "UPDATE t_after_sale SET refund_status = 1 WHERE id = $asId3;" | Out-Null
+$query = Http-Json -Method POST -Url "$admin/api/v1/admin/after-sale/$asId3/query-refund" -Token $adminToken -Name '95-query-refund'
+Check 'I1 manual refund query converges PROCESSING -> SUCCESS (2)' ((Code $query) -eq 200 -and (Payload $query).refundStatus -eq 2) "code=$(Code $query) status=$(Payload $query).refundStatus"
+
+$dbAfterQuery = Sql "SELECT CONCAT(refund_status,'|',IF(IFNULL(refund_time,'')='','none','set')) FROM t_after_sale WHERE id = $asId3;"
+Check 'I2 db reflects the converged status' ($dbAfterQuery -eq '2|set') "row=$dbAfterQuery"
+
+$query2 = Http-Json -Method POST -Url "$admin/api/v1/admin/after-sale/$asId3/query-refund" -Token $adminToken -Name '96-query-again'
+Check 'I3 querying again is idempotent (still SUCCESS)' ((Code $query2) -eq 200 -and (Payload $query2).refundStatus -eq 2) "status=$(Payload $query2).refundStatus"
+
+# 退款通知端点：微信没配平台证书时必须拒绝（不能"验不了就放过"）
+$notify = Http-Json -Method POST -Url "$portal/api/v1/portal/pay/refund-notify/WECHAT_NATIVE" -Body @{ id = 'evt-x'; event_type = 'REFUND.SUCCESS' } -Name '97-refund-notify'
+Check 'I4 refund notify rejected without platform cert (4001/4005)' ((Code $notify) -in @(4001, 4005) -or $notify.http -ge 400) "code=$(Code $notify) http=$($notify.http)"
+
+# 模拟渠道没有退款通知：调用应当被明确拒绝，而不是静默 200
+$notifyMock = Http-Json -Method POST -Url "$portal/api/v1/portal/pay/refund-notify/MOCK" -Body @{ x = '1' } -Name '98-refund-notify-mock'
+Check 'I5 mock channel has no refund notify (rejected, not silent 200)' ((Code $notifyMock) -ne 200) "code=$(Code $notifyMock)"
+
 # ============================================================ cleanup
 
 Write-Host ''

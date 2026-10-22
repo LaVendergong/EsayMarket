@@ -68,6 +68,17 @@ public class MockPaymentChannel implements PaymentChannel {
                 .build();
     }
 
+    /** 模拟渠道的退款查询：直接回 SUCCESS，用来验证「退款中 -> 退款成功」的收敛链路 */
+    @Override
+    public PayModels.RefundNotifyResult queryRefund(PayModels.RefundQuery query) {
+        return PayModels.RefundNotifyResult.builder()
+                .refundNo(query.getRefundNo())
+                .channelRefundNo("MOCKREFUND-" + query.getRefundNo())
+                .status("SUCCESS")
+                .raw("{\"mock\":true}")
+                .build();
+    }
+
     @Override
     public PayModels.NotifyResult parseNotify(Map<String, String> params, String body, Map<String, String> headers) {
         // 模拟渠道没有真实回调；这条路径只被 mock-pay 接口用到

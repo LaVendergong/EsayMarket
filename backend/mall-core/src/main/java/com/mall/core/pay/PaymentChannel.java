@@ -1,5 +1,7 @@
 package com.mall.core.pay;
 
+import com.mall.common.exception.BusinessException;
+import com.mall.common.result.ResultCode;
 import com.mall.core.enums.PayChannel;
 
 import java.util.Map;
@@ -40,6 +42,26 @@ public interface PaymentChannel {
      * </ul>
      */
     PayModels.RefundResult refund(PayModels.RefundCommand command);
+
+    /**
+     * 主动查退款单状态（对账兜底）。
+     *
+     * <p>为什么要它：退款通知可能丢（网络抖动、回调地址配错、服务重启），
+     * 只靠通知的话「退款中」会永远停在那里。定时任务用它把状态收敛掉。
+     */
+    default PayModels.RefundNotifyResult queryRefund(PayModels.RefundQuery query) {
+        throw new BusinessException(ResultCode.REFUND_NOT_SUPPORTED, "该渠道不支持退款查询");
+    }
+
+    /**
+     * 解析退款异步通知。
+     *
+     * <p>和支付通知一样，**验签失败必须抛异常**；不支持退款通知的渠道也直接抛。
+     */
+    default PayModels.RefundNotifyResult parseRefundNotify(Map<String, String> params, String body,
+                                                          Map<String, String> headers) {
+        throw new BusinessException(ResultCode.REFUND_NOT_SUPPORTED, "该渠道没有退款异步通知");
+    }
 
     /**
      * 解析并校验渠道回调。

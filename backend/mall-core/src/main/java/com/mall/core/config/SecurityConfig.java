@@ -62,6 +62,8 @@ public class SecurityConfig {
                         // 安全性完全依赖各渠道的**验签**（支付宝 RSA2 / 微信平台证书），验不过直接抛异常，
                         // 走不到改订单状态那一步 —— 见 PaymentServiceImpl.handleNotify。
                         .requestMatchers(HttpMethod.POST, "/api/v1/portal/pay/notify/**").permitAll()
+                // 退款结果通知同理（微信有退款通知，支付宝走主动查单）
+                .requestMatchers(HttpMethod.POST, "/api/v1/portal/pay/refund-notify/**").permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         .requestMatchers("/api/v1/**").authenticated()
                         .anyRequest().permitAll())

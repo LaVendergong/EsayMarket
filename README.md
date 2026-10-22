@@ -148,7 +148,7 @@ node scripts/web-flow.mjs
 # 管理后台 UI CRUD（16 项断言：分类增删改禁用 / 商品新增-下架-删除）
 node scripts/admin-crud-verify.mjs
 
-# 售后 + 退款（52 项断言：状态机 / 库存语义 / 渠道退款 / 重试幂等 / 失败路径 / 越权；会自己停/起后端）
+# 售后 + 退款（57 项断言：状态机 / 渠道退款 / 重试幂等 / 失败路径 / 退款状态收敛 / 越权；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/after-sale-verify.ps1
 
 # 支付链路（34 项断言：支付单/渠道/幂等/回调验签/越权；会自己停/起后端）
@@ -208,7 +208,9 @@ prod 下的行为差异：
   入口：订单详情、我的 → 我的售后；后台「售后处理」菜单。
   **退款会真正打到原支付渠道**（MOCK / 支付宝 `alipay.trade.refund` / 微信 `/v3/refund/domestic/refunds`）：
   退款单号由售后单号派生（渠道侧幂等，重试不会重复退钱）；退款失败时售后保持待处理、失败原因落库，
-  订单不会被标成"已退款"。售后状态与退款状态是两个字段（同意 ≠ 钱到账）。  入口：订单详情、我的 → 我的售后；后台「售后处理」菜单。
+  订单不会被标成"已退款"。售后状态与退款状态是两个字段（同意 ≠ 钱到账）。
+  「退款中」会被三条路径收敛：微信退款通知（`/portal/pay/refund-notify/{channel}`）、
+  每 5 分钟的 `RefundReconcileTask` 主动查单、后台售后的「查询退款」手动触发。  入口：订单详情、我的 → 我的售后；后台「售后处理」菜单。
 - **备份**：`scripts/backup-db.ps1` 做一致性快照（保留最近 7 份）；`scripts/backup-restore-verify.ps1`
   会真的备份→恢复到临时库→逐表比对→清理，用来证明「备份能恢复」。**没有恢复过的备份不算备份。**
 - **监控**：两个后端都暴露 `/actuator/prometheus`（JVM / 连接池 / HTTP 指标 + 两个业务计数器）。

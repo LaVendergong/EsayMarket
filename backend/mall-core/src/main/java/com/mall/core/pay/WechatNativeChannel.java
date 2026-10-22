@@ -203,6 +203,82 @@ public class WechatNativeChannel implements PaymentChannel {
         }
     }
 
+    /**
+     * 主动查退款单（{@code GET /v3/refund/domestic/refunds/{out_refund_no}}）。
+     *
+     * <p>这是「退款中」能自动收敛的关键：退款通知会丢，但状态可以主动问。
+     */
+    @Override
+    public PayModels.RefundNotifyResult queryRefund(PayModels.RefundQuery query) {
+        PayProperties.Wechat cfg = properties.getWechat();
+        if (!available()) {
+            throw new BusinessException(ResultCode.PAY_CHANNEL_UNAVAILABLE, "微信支付渠道未配置");
+        }
+        String path = PATH_REFUND + "/" + query.getRefundNo();
+        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String nonce = randomNonce();
+        // GET 没有请求体，待签名串里 body 位置是空字符串（末尾换行仍不能少）
+        String authorization = buildAuthorization(cfg, "GET", path, "", timestamp, nonce);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(cfg.getApiBase() + path))
+                .timeout(Duration.ofSeconds(15))
+                .header("Authorization", authorization)
+                .header("Accept", "application/json")
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> resp = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (resp.statusCode() != 200) {
+                throw new BusinessException(ResultCode.REFUND_FAILED, "微信退款查询失败：" + resp.statusCode());
+            }
+            var node = JSON.readTree(resp.body());
+            return PayModels.RefundNotifyResult.builder()
+                    .refundNo(query.getRefundNo())
+                    .channelRefundNo(node.path("refund_id").asText(null))
+                    .status(node.path("status").asText("PROCESSING"))
+                    .raw(resp.body())
+                    .build();
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[pay] wechat refund query error: {}", e.toString());
+            throw new BusinessException(ResultCode.REFUND_FAILED, "微信退款查询请求失败");
+        }
+    }
+
+    /**
+     * 退款异步通知（{@code REFUND.SUCCESS} / {@code REFUND.ABNORMAL} / {@code REFUND.CLOSED}）。
+     *
+     * <p>注意退款通知里的字段是 {@code refund_status}，**不是**支付通知里的 {@code trade_state}；
+     * 用错字段会永远判不出成功。
+     */
+    @Override
+    public PayModels.RefundNotifyResult parseRefundNotify(Map<String, String> params, String body,
+                                                          Map<String, String> headers) {
+        PayProperties.Wechat cfg = properties.getWechat();
+        if (!available()) {
+            throw new BusinessException(ResultCode.PAY_CHANNEL_UNAVAILABLE, "微信支付渠道未配置");
+        }
+        verifySignature(cfg, headers, body);
+        try {
+            JsonNode resource = JSON.readTree(body).path("resource");
+            String plain = decryptGcm(cfg.getApiV3Key(), resource.path("associated_data").asText(""),
+                    resource.path("nonce").asText(), resource.path("ciphertext").asText());
+            JsonNode data = JSON.readTree(plain);
+            return PayModels.RefundNotifyResult.builder()
+                    .refundNo(data.path("out_refund_no").asText())
+                    .channelRefundNo(data.path("refund_id").asText(null))
+                    .status(data.path("refund_status").asText(""))
+                    .raw(body)
+                    .build();
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new BusinessException(ResultCode.PAY_NOTIFY_INVALID, "微信退款通知解析失败");
+        }
+    }
+
     private static long toFen(BigDecimal yuan) {
         return yuan == null ? 0L
                 : yuan.multiply(BigDecimal.valueOf(100)).setScale(0, java.math.RoundingMode.HALF_UP).longValue();

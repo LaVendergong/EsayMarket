@@ -67,6 +67,37 @@ public final class PayModels {
         private String raw;
     }
 
+    /** 退款查询入参 */
+    @Data
+    @Builder
+    public static class RefundQuery {
+        /** 原支付单号（支付宝查询需要 out_trade_no） */
+        private String paymentNo;
+        /** 商户退款单号 */
+        private String refundNo;
+    }
+
+    /** 退款通知 / 主动查单的解析结果 */
+    @Data
+    @Builder
+    public static class RefundNotifyResult {
+        private String refundNo;
+        private String channelRefundNo;
+        /** SUCCESS / PROCESSING / ABNORMAL / CLOSED */
+        private String status;
+        private String raw;
+
+        /** 是否已经明确到账 */
+        public boolean isSuccess() {
+            return "SUCCESS".equalsIgnoreCase(status);
+        }
+
+        /** 是否明确失败（需要人工介入） */
+        public boolean isFailed() {
+            return "ABNORMAL".equalsIgnoreCase(status) || "CLOSED".equalsIgnoreCase(status);
+        }
+    }
+
     /** 渠道回调解析结果 */
     @Data
     @Builder

@@ -84,6 +84,61 @@ class WechatNativeChannelTest {
         assertThat(decrypted).isEqualTo(plain);
     }
 
+    /**
+     * 退款通知的字段是 refund_status（不是 trade_state），这里钉住解析结果。
+     *
+     * <p>放开验签只是为了能单独测"解密 + 取字段"这段逻辑（生产必须配平台证书）。
+     */
+    @Test
+    void refundNotify_isDecryptedAndParsed() throws Exception {
+        cfg.setAllowUnverifiedNotify(true);
+        PayProperties properties = new PayProperties();
+        properties.setWechat(cfg);
+        WechatNativeChannel channel = new WechatNativeChannel(properties);
+
+        String nonce = "abcdefghijkl";
+        String plain = "{\"out_refund_no\":\"RFAS1\",\"refund_id\":\"50000001\",\"refund_status\":\"SUCCESS\",\"amount\":{\"refund\":100}}";
+        String ciphertext = encrypt(cfg.getApiV3Key(), "refund", nonce, plain);
+        String body = "{\"id\":\"evt-1\",\"event_type\":\"REFUND.SUCCESS\",\"resource\":{"
+                + "\"algorithm\":\"AEAD_AES_256_GCM\",\"ciphertext\":\"" + ciphertext + "\","
+                + "\"nonce\":\"" + nonce + "\",\"associated_data\":\"refund\"}}";
+
+        PayModels.RefundNotifyResult r = channel.parseRefundNotify(Map.of(), body, Map.of());
+
+        assertThat(r.getRefundNo()).isEqualTo("RFAS1");
+        assertThat(r.getChannelRefundNo()).isEqualTo("50000001");
+        assertThat(r.getStatus()).isEqualTo("SUCCESS");
+        assertThat(r.isSuccess()).isTrue();
+        assertThat(r.isFailed()).isFalse();
+    }
+
+    @Test
+    void refundNotify_abnormalIsTreatedAsFailed() throws Exception {
+        cfg.setAllowUnverifiedNotify(true);
+        PayProperties properties = new PayProperties();
+        properties.setWechat(cfg);
+        WechatNativeChannel channel = new WechatNativeChannel(properties);
+
+        String nonce = "abcdefghijkl";
+        String plain = "{\"out_refund_no\":\"RFAS2\",\"refund_id\":\"50000002\",\"refund_status\":\"ABNORMAL\"}";
+        String ciphertext = encrypt(cfg.getApiV3Key(), "refund", nonce, plain);
+        String body = "{\"resource\":{\"ciphertext\":\"" + ciphertext + "\",\"nonce\":\"" + nonce
+                + "\",\"associated_data\":\"refund\"}}";
+
+        PayModels.RefundNotifyResult r = channel.parseRefundNotify(Map.of(), body, Map.of());
+
+        assertThat(r.isSuccess()).isFalse();
+        assertThat(r.isFailed()).isTrue();
+    }
+
+    private static String encrypt(String key, String aad, String nonce, String plain) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "AES"),
+                new GCMParameterSpec(128, nonce.getBytes(StandardCharsets.UTF_8)));
+        cipher.updateAAD(aad.getBytes(StandardCharsets.UTF_8));
+        return Base64.getEncoder().encodeToString(cipher.doFinal(plain.getBytes(StandardCharsets.UTF_8)));
+    }
+
     @Test
     void notifyWithoutPlatformCert_isRejectedByDefault() {
         PayProperties properties = new PayProperties();
