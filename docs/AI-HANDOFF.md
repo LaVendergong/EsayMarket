@@ -106,6 +106,8 @@ D:\projects\mall\
 │   ├── auth-cookie-verify.ps1    登录态验证（27 项断言：HttpOnly / SameSite / CSRF 双提交 / 退出清理 / 两应用隔离）
 │   ├── crypto-rotate-verify.ps1  密钥轮换演练（28 项断言：换密钥→旧数据仍可读→重加密→去掉旧密钥仍可读→还原）
 │   ├── token-lifecycle-verify.ps1 令牌生命周期（26 项断言：access 真过期 / refresh 轮换 / 重放失败 / 登出吊销）
+│   ├── deploy-up.ps1             一键起容器栈（内存检查 + 等健康 + Windows 端口转发自愈）
+│   ├── deploy-down.ps1           一键停栈并 `wsl --shutdown` 释放内存（`-Purge` 连数据卷）
 │   ├── deploy-verify.sh          部署验证（51 项：容器/迁移/prod 行为/Cookie/nginx/端到端/资金链路；在容器栈上跑）
 │   ├── deploy-browser-check.mjs  部署后浏览器冒烟（9 项：UI 登录 + Secure Cookie + 渲染中文不乱码）
 │   ├── backup-db.ps1             数据库逻辑备份（mysqldump 一致性快照，保留最近 N 份）
@@ -824,7 +826,15 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 113. **`Environment.getActiveProfiles()` 可能返回 null**：`Arrays.asList(null)` 直接 NPE，
      把"应该抛 IllegalStateException"的断言变成"抛了别的异常"，排查时很迷惑。用之前判空。
 114. **只测接口不测构建产物，前端漏打包也是"全绿"**：Vite 按组件名切 chunk，
-     直接在镜像里 `ls assets | grep ReconcileView` 就能确认新页面真的进了产物。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+     直接在镜像里 `ls assets | grep ReconcileView` 就能确认新页面真的进了产物。115. **容器 Up 但浏览器打不开 = Windows→WSL 的 localhost 转发断了**（不是应用问题）。
+     判据：WSL 内 `curl localhost:15174` 得 200，Windows 侧同一地址 000。
+     成因是 WSL 虚拟机被重启（内存压力），`wslrelay` 没重新接上；`wsl --shutdown` 后再起即可恢复。
+116. **容器里的 JVM 不设 `-Xmx` 会按宿主机 1/4 算内存**（16GB 机器 ≈ 4GB/个），两个后端就能把 WSL 撑爆。
+     本地栈必须同时给 `JAVA_OPTS: -Xmx384m` 和 `mem_limit`；实测整栈从 ~3.5GB 降到 ~1GB。
+117. **健康检查别从宿主机探测**：转发可能正好是坏的，会误判成"后端没起来"（第一版脚本就这么错的）。
+     要 `wsl -e bash -c 'curl http://127.0.0.1:18090/actuator/health'` 在容器网络内探。
+118. **"栈已在运行"时不要用可用内存做准入门槛**：vmmemWSL 正占着那几 GB，可用内存天然就低。
+     先判断容器数量，已起就只做健康与转发自愈。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -1063,6 +1073,37 @@ IllegalStateException: [prod 启动自检失败] mall.pay.mock-enabled 必须为
 
 最后两条是刻意的：**只测接口的话，前端漏打包照样"全绿"**。Vite 按组件名切 chunk，
 所以直接在镜像里查 `ReconcileView-*.js` / `CashierView-*.js` 是否存在。
+
+### 本地部署栈的一键启停（`deploy-up.ps1` / `deploy-down.ps1`）
+
+容器栈的问题不是"起不来"，而是**这台 16GB 机器上它会把内存吃干**，于是 WSL 虚拟机被反复重启，
+表现为「容器明明是 Up，浏览器却打不开」。两个脚本把这件事闭环：
+
+| 脚本 | 做的事 |
+|---|---|
+| `deploy-up.ps1` | 内存检查（<3GB 直接拦下并列出占用最高的进程）→ 同步代码到 WSL → 起栈 → **在 WSL 内**等健康 → 检查 Windows 端口转发，断了就重启 WSL 自愈 |
+| `deploy-down.ps1` | `compose down` → `wsl --shutdown` 把内存还回来（`-Purge` 连数据卷一起删） |
+
+#### 顺手把栈的内存压下来了
+
+原来两个后端 JVM **没设 `-Xmx`**，容器不限内存时 JVM 按宿主机 1/4 算（16GB ≈ 4GB/个），
+MySQL 默认缓冲池也不小。现在本地栈给了硬上限：
+
+```yaml
+JAVA_OPTS: "-Xms128m -Xmx384m -XX:MaxMetaspaceSize=192m -XX:+UseSerialGC"
+mem_limit: 768m          # 两个后端
+mem_limit: 640m          # mysql（+ innodb-buffer-pool 96M / performance_schema=OFF）
+mem_limit: 64m           # 两个 nginx
+```
+
+实测整栈 **~3.5GB → ~0.99GB**，而且 `deploy-verify.sh` 仍然 **51/51**（384m 堆跑完整资金链路没问题）。
+
+#### 两个"探活"上的坑（都踩过）
+
+1. **健康检查不能从宿主机探**：Windows 的 localhost 转发可能正好是坏的，会误判成"后端没起来"。
+   要在 WSL 内 `curl 127.0.0.1:18090/actuator/health`。
+2. **栈已在运行时不要用"可用内存"当准入门槛**：vmmemWSL 正占着那几个 GB，可用内存天然就低。
+   先数容器，已起就只做健康 + 转发自愈。
 
 ### 压测基线（`load-test.mjs` 14/14，抓到一个真 bug）
 

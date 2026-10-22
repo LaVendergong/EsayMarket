@@ -26,6 +26,7 @@ x-logging: &default-logging
 services:
   mysql:
     image: mysql:8.0
+    mem_limit: 640m
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_general_ci
@@ -59,7 +60,11 @@ services:
       args:
         MODULE: mall-admin
     image: mall/mall-admin:localtest
+    mem_limit: 768m
     environment:
+      # 本地栈给 JVM 设上限：不设时默认按宿主机 1/4 算（能吃到 4GB），
+      # 在这台 16GB 机器上会把 WSL 虚拟机挤到反复重启。生产环境按实际规格再调。
+      JAVA_OPTS: "-Xms128m -Xmx384m -XX:MaxMetaspaceSize=192m -XX:+UseSerialGC"
       SPRING_PROFILES_ACTIVE: prod,localtest
       MALL_DB_URL: "jdbc:mysql://mysql:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false"
       MALL_DB_USERNAME: root
@@ -86,7 +91,11 @@ services:
       args:
         MODULE: mall-portal
     image: mall/mall-portal:localtest
+    mem_limit: 768m
     environment:
+      # 本地栈给 JVM 设上限：不设时默认按宿主机 1/4 算（能吃到 4GB），
+      # 在这台 16GB 机器上会把 WSL 虚拟机挤到反复重启。生产环境按实际规格再调。
+      JAVA_OPTS: "-Xms128m -Xmx384m -XX:MaxMetaspaceSize=192m -XX:+UseSerialGC"
       SPRING_PROFILES_ACTIVE: prod,localtest
       MALL_DB_URL: "jdbc:mysql://mysql:3306/mall?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false"
       MALL_DB_USERNAME: root
@@ -109,6 +118,7 @@ services:
     build:
       context: ./frontend/admin-web
     image: mall/admin-web:localtest
+    mem_limit: 64m
     ports:
       - "15173:80"
     depends_on:
@@ -120,6 +130,7 @@ services:
     build:
       context: ./frontend/portal-web
     image: mall/portal-web:localtest
+    mem_limit: 64m
     ports:
       - "15174:80"
     depends_on:
