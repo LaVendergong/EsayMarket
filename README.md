@@ -142,7 +142,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/p3-verify.ps1
 # 前端页面渲染检查（24 项断言 + 控制台告警零容忍；需要 Chrome + 前后端都已启动）
 node scripts/web-check.mjs
 
-# 前端全流程交互测试（57 项断言：真点按钮跑完整个闭环，含「立即购买」「取消订单」「待支付倒计时」「再次购买」「售罄置灰」「申请售后→后台同意退款」）
+# 前端全流程交互测试（61 项断言：真点按钮跑完整个闭环，含「立即购买」「收银台支付」「取消订单」「待支付倒计时」「再次购买」「售罄置灰」「申请售后→后台同意退款」）
 node scripts/web-flow.mjs
 
 # 管理后台 UI CRUD（16 项断言：分类增删改禁用 / 商品新增-下架-删除）
@@ -150,6 +150,9 @@ node scripts/admin-crud-verify.mjs
 
 # 售后状态机（44 项断言：申请/撤销/拒绝/同意 + 库存语义 + 越权；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/after-sale-verify.ps1
+
+# 支付链路（34 项断言：支付单/渠道/幂等/回调验签/越权；会自己停/起后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/payment-verify.ps1
 ```
 
 前两个脚本会自己 stop → build → run → 跑断言 → 汇总，证据落在 `tmp/<阶段>/`。
@@ -195,7 +198,12 @@ prod 下的行为差异：
 - 业务接口统一在 **`/api/v1/**`** 下（旧的无版本路径已移除，会 404）
 - **日志只打 stdout**：docker 部署由 `docker-compose.yml` 里的 `json-file` 上限（`max-size=20m` / `max-file=5`）兜住；
   裸机长跑请把 stdout 交给 `logrotate` 或 systemd-journald。后端**不自带**文件滚动（原因见 `docs/AI-HANDOFF.md`）
-- **售后**：支持「仅退款」「退货退款」两种（**换货不做**，避免半成品）。状态机是
+- **支付**：下单后进收银台（`/pay/{orderId}`），渠道可插拔（`PaymentChannel` SPI）：
+  - `MOCK` 模拟支付 —— 本地/自动化测试用，**prod 必须关闭**（`mall.pay.mock-enabled=false`，启动自检会拦）
+  - `ALIPAY_WAP` 支付宝手机网站支付 —— 真实 RSA2 签名/验签，需 appId + 应用私钥 + 支付宝公钥
+  - `WECHAT_NATIVE` 微信扫码 —— 真实 v3 签名 + 回调 AES-GCM 解密，需 mchId + 证书 + APIv3 密钥
+  没有商户资质时，未配置的渠道**不会出现在收银台**（而不是点了报错）。支付结果以渠道异步回调为准：
+  验签 → 校验金额 → 幂等置为已支付 → 订单扣库存加销量。- **售后**：支持「仅退款」「退货退款」两种（**换货不做**，避免半成品）。状态机是
   待商家处理 → 已退款 / 已拒绝 / 已撤销；同一订单同时只能有一个进行中的售后，商家同意才会退款并（退货退款时）恢复库存。
   入口：订单详情、我的 → 我的售后；后台「售后处理」菜单。
 - **备份**：`scripts/backup-db.ps1` 做一致性快照（保留最近 7 份）；`scripts/backup-restore-verify.ps1`
@@ -210,7 +218,7 @@ prod 下的行为差异：
 > 这个自检是必需的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把解析不了的占位符
 > **原样保留而不是报错**，只靠 YAML 写 `${MALL_JWT_SECRET}` 拦不住（详见 `docs/AI-HANDOFF.md` §8 第 26 条）。
 
-CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V8、两个前端 typecheck+build。
+CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V9、两个前端 typecheck+build。
 
 ## 几个必须知道的坑
 

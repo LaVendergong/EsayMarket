@@ -85,6 +85,12 @@ const router = createRouter({
       meta: { title: '订单详情', auth: true }
     },
     {
+      path: '/pay/:orderId',
+      name: 'cashier',
+      component: () => import('@/views/CashierView.vue'),
+      meta: { title: '收银台', auth: true }
+    },
+    {
       path: '/after-sale',
       name: 'afterSaleList',
       component: () => import('@/views/AfterSaleListView.vue'),

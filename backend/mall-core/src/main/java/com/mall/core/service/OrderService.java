@@ -40,4 +40,12 @@ public interface OrderService {
 
     /** 超时关单：把 expire_time 已过且仍待支付的订单关掉并释放库存，返回处理条数 */
     int closeExpiredOrders(int limit);
+
+    /**
+     * 支付成功后落账：订单 待支付 -> 已支付，扣减库存、累加销量。
+     *
+     * <p>由支付模块在「渠道回调 / 模拟支付成功」时调用。与 {@link #pay} 的区别是**幂等** ——
+     * 渠道会重试回调，重复调用不会重复扣库存。
+     */
+    void markPaid(Long orderId, String channel, String paymentNo);
 }

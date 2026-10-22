@@ -1,5 +1,7 @@
 import { http } from './http'
-import type { AfterSaleVO, 
+import type { AfterSaleVO,
+  PayChannelOption,
+  PaymentVO, 
   AddressDTO,
   AddressVO,
   CartVO,
@@ -97,4 +99,14 @@ export const afterSaleApi = {
   /** 订单详情页用它判断「能不能申请 / 现在走到哪一步」，没有售后时返回 null */
   byOrder: (orderId: number) => http.get<never, AfterSaleVO | null>(`/portal/after-sale/by-order/${orderId}`),
   cancel: (id: number) => http.post<never, void>(`/portal/after-sale/${id}/cancel`)
+}
+/** 支付：可用渠道 / 创建支付单 / 查状态 / 模拟支付 / 关闭 */
+export const paymentApi = {
+  channels: () => http.get<never, PayChannelOption[]>('/portal/payment/channels'),
+  create: (orderId: number, channel: string) =>
+    http.post<never, PaymentVO>('/portal/payment', { orderId, channel }),
+  detail: (paymentNo: string) => http.get<never, PaymentVO>(`/portal/payment/${paymentNo}`),
+  /** 仅 MOCK 渠道：点一下就算付款成功（本地/自动化测试） */
+  mockPay: (paymentNo: string) => http.post<never, void>(`/portal/payment/${paymentNo}/mock-pay`),
+  close: (paymentNo: string) => http.post<never, void>(`/portal/payment/${paymentNo}/close`)
 }

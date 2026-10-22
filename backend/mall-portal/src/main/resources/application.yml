@@ -66,7 +66,31 @@ mall:
     # 仅用于**解密**的历史密钥（逗号分隔），密钥轮换过渡期用；重加密完成后必须清空
     previous-secrets: ${MALL_CRYPTO_PREVIOUS_SECRETS:}
     # 一次性运维开关：启动时把仍在历史密钥下的密文重加密成当前密钥。平时保持 false
+    # 一次性运维开关：启动时把仍在历史密钥下的密文重加密成当前密钥。平时保持 false
     re-encrypt-on-startup: ${MALL_CRYPTO_RE_ENCRYPT_ON_STARTUP:false}
+  pay:
+    # 模拟支付渠道：本地/测试用。**prod 必须 false**，否则任何人都能把自己的订单"付"成已支付
+    mock-enabled: ${MALL_PAY_MOCK_ENABLED:true}
+    expire-minutes: ${MALL_PAY_EXPIRE_MINUTES:30}
+    # 支付宝手机网站支付：填了 appId + 应用私钥 + 支付宝公钥才算「可用」
+    alipay:
+      app-id: ${MALL_PAY_ALIPAY_APP_ID:}
+      private-key: ${MALL_PAY_ALIPAY_PRIVATE_KEY:}
+      public-key: ${MALL_PAY_ALIPAY_PUBLIC_KEY:}
+      gateway: ${MALL_PAY_ALIPAY_GATEWAY:https://openapi.alipay.com/gateway.do}
+      notify-url: ${MALL_PAY_ALIPAY_NOTIFY_URL:}
+      return-url: ${MALL_PAY_ALIPAY_RETURN_URL:}
+    # 微信 Native 扫码：需要 mchId + 证书序列号 + 商户私钥；回调验签还要平台证书
+    wechat:
+      app-id: ${MALL_PAY_WECHAT_APP_ID:}
+      mch-id: ${MALL_PAY_WECHAT_MCH_ID:}
+      serial-no: ${MALL_PAY_WECHAT_SERIAL_NO:}
+      private-key: ${MALL_PAY_WECHAT_PRIVATE_KEY:}
+      api-v3-key: ${MALL_PAY_WECHAT_API_V3_KEY:}
+      platform-cert: ${MALL_PAY_WECHAT_PLATFORM_CERT:}
+      api-base: ${MALL_PAY_WECHAT_API_BASE:https://api.mch.weixin.qq.com}
+      notify-url: ${MALL_PAY_WECHAT_NOTIFY_URL:}
+      allow-unverified-notify: ${MALL_PAY_WECHAT_ALLOW_UNVERIFIED_NOTIFY:false}
 
 # 日志只打 stdout，格式在 backend/mall-core/src/main/resources/logback-spring.xml 里；
 # 目录/轮转交给运行环境（docker 的 json-file 上限见 docker-compose.yml，裸机交给 logrotate）。

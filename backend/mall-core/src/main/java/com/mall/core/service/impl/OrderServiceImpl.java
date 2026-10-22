@@ -29,6 +29,7 @@ import com.mall.core.model.vo.OrderVO;
 import com.mall.core.service.AddressService;
 import com.mall.core.service.OrderService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -46,6 +47,7 @@ import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrderServiceImpl implements OrderService {
@@ -236,11 +238,40 @@ public class OrderServiceImpl implements OrderService {
     @Transactional(rollbackFor = Exception.class)
     public void pay(Long userId, Long orderId) {
         Order order = requireOwned(userId, orderId);
+        markPaidInternal(order, false);
+    }
+
+    /**
+     * 支付成功后落账（由 {@code PaymentService} 在渠道回调/模拟支付成功时调用）。
+     *
+     * <p>和 {@link #pay} 的区别是**幂等**：渠道回调会重试，同一笔支付可能通知多次，
+     * 第二次进来时订单已经是已支付，这里直接返回，不会再扣一次库存、再加一次销量。
+     *
+     * <p>注意扣库存用的是 `deductStock`（stock 真扣减），不是 release —— 后者只释放锁定库存，
+     * 用在取消订单上。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void markPaid(Long orderId, String channel, String paymentNo) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BusinessException(ResultCode.ORDER_NOT_FOUND);
+        }
+        log.info("[order] markPaid orderNo={} channel={} paymentNo={}", order.getOrderNo(), channel, paymentNo);
+        markPaidInternal(order, true);
+    }
+
+    private void markPaidInternal(Order order, boolean idempotent) {
+        Long orderId = order.getId();
         if (order.getExpireTime() != null && !order.getExpireTime().isAfter(LocalDateTime.now())) {
             throw new BusinessException(ResultCode.ORDER_STATUS_ERROR, "订单已超时，无法支付");
         }
         List<OrderItem> items = itemsOf(orderId);
-        if (transition(orderId, userId, OrderStatus.UNPAID, OrderStatus.PAID, true) == 0) {
+        if (transition(orderId, order.getUserId(), OrderStatus.UNPAID, OrderStatus.PAID, true) == 0) {
+            if (idempotent && alreadyPaid(orderId)) {
+                // 渠道重复回调：钱只收到一次，库存/销量也只能算一次
+                return;
+            }
             throw new BusinessException(ResultCode.ORDER_STATUS_ERROR, "只有待支付订单才能支付");
         }
         Map<Long, Integer> qtyByProduct = new HashMap<>();
@@ -254,6 +285,20 @@ public class OrderServiceImpl implements OrderService {
         for (Map.Entry<Long, Integer> e : qtyByProduct.entrySet()) {
             productMapper.incrementSales(e.getKey(), e.getValue());
         }
+    }
+
+    /** 订单是否已经处在「付过钱」之后的状态（重复回调时用来判定幂等） */
+    private boolean alreadyPaid(Long orderId) {
+        Order cur = orderMapper.selectById(orderId);
+        if (cur == null || cur.getStatus() == null) {
+            return false;
+        }
+        int s = cur.getStatus();
+        return s == OrderStatus.PAID.getCode()
+                || s == OrderStatus.SHIPPED.getCode()
+                || s == OrderStatus.FINISHED.getCode()
+                || s == OrderStatus.AFTER_SALE.getCode()
+                || s == OrderStatus.REFUNDED.getCode();
     }
 
     @Override

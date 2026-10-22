@@ -45,10 +45,9 @@ function reload() {
   loadPage()
 }
 
-async function pay(o: OrderVO) {
-  await orderApi.pay(o.id)
-  showSuccessToast('支付成功')
-  reload()
+/** 去支付：统一进收银台选渠道，不再直接调「模拟支付」接口 */
+function pay(o: OrderVO) {
+  router.push(`/pay/${o.id}`)
 }
 
 async function cancel(o: OrderVO) {

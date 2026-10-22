@@ -39,7 +39,12 @@ public enum ResultCode {
     AFTER_SALE_NOT_FOUND(3003, "售后单不存在"),
     AFTER_SALE_STATUS_ERROR(3004, "当前售后状态不允许该操作"),
     AFTER_SALE_EXISTS(3005, "该订单已有进行中的售后，请等商家处理"),
-    AFTER_SALE_NOT_ALLOWED(3006, "当前订单状态不支持申请售后（需已支付/已发货/已完成）");
+    AFTER_SALE_NOT_ALLOWED(3006, "当前订单状态不支持申请售后（需已支付/已发货/已完成）"),
+    PAY_CHANNEL_UNAVAILABLE(4001, "支付渠道不可用或未配置"),
+    PAYMENT_NOT_FOUND(4002, "支付单不存在"),
+    PAYMENT_STATUS_ERROR(4003, "当前支付状态不允许该操作"),
+    PAY_AMOUNT_MISMATCH(4004, "支付金额与订单不一致"),
+    PAY_NOTIFY_INVALID(4005, "支付回调校验失败");
 
     private final int code;
     private final String message;

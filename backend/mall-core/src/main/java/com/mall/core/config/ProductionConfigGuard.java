@@ -50,6 +50,7 @@ public class ProductionConfigGuard {
         checkCorsOrigins();
         checkCryptoSecret();
         checkCookieSecure();
+        checkMockPayment();
 
         log.info("[prod 启动自检] 通过：JWT 密钥、数据库口令、PII 加密密钥均已从环境变量注入");
     }
@@ -86,6 +87,20 @@ public class ProductionConfigGuard {
         if (!"true".equalsIgnoreCase(secure)) {
             throw new IllegalStateException("[prod 启动自检失败] mall.security.cookie.secure 必须为 true："
                     + "登录态存在 HttpOnly Cookie 里，prod 必须在 HTTPS 后面（设 MALL_COOKIE_SECURE=true）");
+        }
+    }
+
+    /**
+     * prod 下必须关掉「模拟支付」。
+     *
+     * <p>模拟支付渠道只要调一个接口就能把订单标成已支付（不需要真付钱）。
+     * 这个开关留在 prod 等于「谁都能白拿商品」，属于灾难级配置错误，必须启动即失败。
+     */
+    private void checkMockPayment() {
+        String mock = env.getProperty("mall.pay.mock-enabled");
+        if ("true".equalsIgnoreCase(mock)) {
+            throw new IllegalStateException("[prod 启动自检失败] mall.pay.mock-enabled 必须为 false："
+                    + "模拟支付渠道不需要真实付款就能把订单标成已支付，prod 打开等于白送商品");
         }
     }
 

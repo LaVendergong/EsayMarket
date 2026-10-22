@@ -277,13 +277,13 @@ try {
   check('结算页商品清单已加载', itemsReady, `含商品=${itemsReady}`)
 
   await clickText('.van-submit-bar__button', '提交订单')
-  const onOrder = await waitFor(onRoute('order/'), 10000)
-  const orderReady = await waitText('待支付')
-  const orderText = await innerText()
+  // 现在提交订单后进的是**收银台**（选渠道 -> 支付 -> 等回调），不再直接把订单标成已支付
+  const onCashier = await waitFor(onRoute('pay/'), 10000)
+  const cashierText = await innerText()
   check(
-    '提交订单后跳转订单详情且状态为待支付',
-    onOrder && orderReady,
-    `hash=${await evalJs('location.hash')} 待支付=${orderReady} | 文本="${orderText.slice(0, 150)}"`
+    '提交订单后进入收银台（而不是直接标记已支付）',
+    onCashier && cashierText.includes('需支付') && cashierText.includes('选择支付方式'),
+    `hash=${await evalJs('location.hash')} 文本="${cashierText.slice(0, 150)}"`
   )
 
   // 拿订单号/订单 id，后面后台发货要用
@@ -297,11 +297,30 @@ try {
     `sku=${sql(`SELECT CONCAT(stock,',',IFNULL(locked_stock,0)) FROM t_sku WHERE product_id = ${prodId};`)}（期望 ${STOCK},${QTY}）`
   )
 
-  await waitSel('.footer .van-button')
-  await clickText('.footer .van-button', '去支付')
+  // 渠道列表必须按「配置是否齐全」过滤：dev 只配了模拟支付，
+  // 支付宝/微信没有商户资质，如果出现在列表里，用户点下去只会拿到 4001。
+  check(
+    '收银台只列出已配置的渠道（模拟支付）',
+    cashierText.includes('模拟支付'),
+    `含模拟支付=${cashierText.includes('模拟支付')}`
+  )
+  check(
+    '未配置的支付宝/微信不出现在收银台',
+    !cashierText.includes('支付宝') && !cashierText.includes('微信支付'),
+    `含支付宝=${cashierText.includes('支付宝')} 含微信=${cashierText.includes('微信支付')}`
+  )
+
+  await clickText('.van-submit-bar__button', '确认支付')
+  const payDone = await waitFor(pageHas('支付成功'), 12000)
+  check('收银台支付成功（模拟渠道）', payDone, `hash=${await evalJs('location.hash')}`)
+
+  const payRow = sql(`SELECT CONCAT(status,'|',channel) FROM t_payment WHERE order_id = ${orderId} ORDER BY id DESC LIMIT 1;`)
+  check('支付单已落库：status=1 且 channel=MOCK', payRow === '1|MOCK', `row=${payRow}（期望 1|MOCK）`)
+
+  await clickText('.van-button', '查看订单')
   const paid = await waitFor(pageHas('已支付'), 8000)
   const afterPay = await innerText()
-  check('前端支付成功且状态变为已支付', paid && afterPay.includes('已支付'), `已支付=${afterPay.includes('已支付')}`)
+  check('前端支付成功且订单状态变为已支付', paid && afterPay.includes('已支付'), `已支付=${afterPay.includes('已支付')}`)
   check(
     `支付后真正扣库存并释放锁定（${STOCK - QTY},0）、销量 =${QTY}`,
     sql(`SELECT CONCAT(stock,',',IFNULL(locked_stock,0)) FROM t_sku WHERE product_id = ${prodId};`) === `${STOCK - QTY},0` &&
@@ -382,9 +401,13 @@ try {
   )
 
   await clickText('.van-submit-bar__button', '提交订单')
-  const onOrder2 = await waitFor(onRoute('order/'), 10000)
-  const order2Ready = await waitText('待支付')
-  check('立即购买下单成功（订单详情显示待支付）', onOrder2 && order2Ready, `hash=${await evalJs('location.hash')}`)
+  const onCashier2 = await waitFor(onRoute('pay/'), 10000)
+  const cashier2Text = await innerText()
+  check(
+    '立即购买下单后同样进入收银台（订单仍为待支付）',
+    onCashier2 && cashier2Text.includes('需支付'),
+    `hash=${await evalJs('location.hash')}`
+  )
 
   // 订单金额按步进器的 2 件算（100 x 2），并且带上了幂等键
   const directOrderId = Number(sql(`SELECT id FROM t_order WHERE user_id = ${buyerId} ORDER BY id DESC LIMIT 1;`))
@@ -421,7 +444,6 @@ try {
   )
   check('订单列表：待支付订单卡片不显示「再次购买」', pendingCardRebuy === 'none', 'card=' + pendingCardRebuy)
   await goto(PORTAL_WEB + '/?r=21#/order/' + directOrderId, 3000)
-  await waitSel('.footer .van-button')
   await waitSel('.footer .van-button')
   await clickText('.footer .van-button', '取消订单')
   const cancelDialog = await waitFor(`!!document.querySelector('.van-dialog__confirm')`, 5000)

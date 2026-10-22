@@ -34,16 +34,10 @@ async function load() {
   }
 }
 
-async function pay() {
+/** 去支付：跳收银台（渠道选择 + 支付结果都在那边） */
+function pay() {
   if (!order.value) return
-  submitting.value = true
-  try {
-    await orderApi.pay(order.value.id)
-    showSuccessToast('支付成功')
-    await load()
-  } finally {
-    submitting.value = false
-  }
+  router.push(`/pay/${order.value.id}`)
 }
 
 async function cancel() {

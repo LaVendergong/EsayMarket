@@ -8,6 +8,7 @@ import com.mall.core.model.vo.OrderCreateVO;
 import com.mall.core.model.vo.OrderVO;
 import com.mall.core.security.UserContext;
 import com.mall.core.service.OrderService;
+import com.mall.core.service.PaymentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
@@ -26,6 +27,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class OrderController {
 
     private final OrderService orderService;
+    private final PaymentService paymentService;
 
     @Operation(summary = "结算购物车选中项下单（addressId 不传用默认地址）")
     @PostMapping
@@ -53,10 +55,17 @@ public class OrderController {
         return R.ok(orderService.detail(UserContext.requireUserId(), id));
     }
 
-    @Operation(summary = "模拟支付：待支付 -> 已支付（扣减库存）")
+    /**
+     * 快捷支付（等价于「用模拟渠道创建支付单并立刻支付成功」）。
+     *
+     * <p>保留这个接口是为了兼容既有调用方与自动化脚本；真实收银台走
+     * {@code POST /portal/payment} + 渠道回调。两者最终都落到
+     * {@code OrderService.markPaid}，所以库存/销量的处理完全一致。
+     */
+    @Operation(summary = "快捷支付（模拟渠道，适合本地与自动化测试）")
     @PostMapping("/{id}/pay")
     public R<Void> pay(@PathVariable Long id) {
-        orderService.pay(UserContext.requireUserId(), id);
+        paymentService.payWithMock(UserContext.requireUserId(), id);
         return R.ok();
     }
 

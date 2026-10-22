@@ -118,7 +118,8 @@ async function submit() {
     // 直连下单没动购物车，没必要刷角标
     if (!isDirect.value) await cart.refresh()
     showSuccessToast('下单成功')
-    router.replace(`/order/${vo.orderId}`)
+    // 下单成功后进收银台选支付方式（不再直接标记已支付）
+    router.replace(`/pay/${vo.orderId}`)
   } catch {
     // 拦截器已提示（没有默认地址 -> 2010，购物车为空 -> 2004，库存不足 -> 2003）
   } finally {

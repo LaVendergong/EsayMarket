@@ -206,3 +206,25 @@ export const AFTER_SALE_REASONS = [
   '少件/漏发',
   '其他'
 ]
+// ---------------------------------------------------------------- 支付
+export interface PaymentVO {
+  id: number
+  paymentNo: string
+  orderId: number
+  orderNo: string
+  channel: string
+  channelText: string
+  amount: number
+  status: number
+  statusText: string
+  /** 调起参数：支付宝 {payUrl} / 微信 {codeUrl} / 模拟 {mockUrl} */
+  payParams: Record<string, string>
+  channelTradeNo?: string
+  expireTime?: string
+  paidTime?: string
+}
+
+export interface PayChannelOption {
+  code: string
+  text: string
+}

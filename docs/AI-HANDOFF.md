@@ -114,6 +114,7 @@ D:\projects\mall\
 │   ├── metrics-verify.ps1        监控验证（16 项断言：prometheus 端点 + 业务计数器真的会动）
 │   ├── admin-crud-verify.mjs     后台分类/商品的 **UI** CRUD 验证（16 项断言）
 │   ├── after-sale-verify.ps1     售后状态机（44 项断言：申请/撤销/拒绝/同意 + 库存语义 + 越权）
+│   ├── payment-verify.ps1        支付链路（34 项断言：支付单/渠道/幂等/回调验签/越权）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -745,7 +746,19 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
     只有退货退款才 `stock + N`。同理「申请时锁库存、支付时扣库存、取消时释放锁库存」三条链路别混着用。
 77. **PowerShell 捕获 `mysql.exe` 的中文输出会按控制台代码页（GBK）解码成乱码**，
     拿它跟源码里的 UTF-8 中文比一定失败（但库里的值是对的）。要比中文就用 `HEX(列)` 比十六进制，
-    输出纯 ASCII，稳定。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+    输出纯 ASCII，稳定。78. **支付幂等分支必须区分「已支付」和「已关闭」**：`UPDATE ... WHERE status=PENDING` 影响 0 行时，
+    如果一律当"重复回调"放过，那么对**已关闭**的支付单调用支付接口会返回 200 —— 订单没变，
+    但调用方以为付成功了（本轮 payment-verify 的 D3 就是这么抓到的真 bug）。
+    正确做法：回查状态，PAID 才幂等返回，CLOSED/FAILED 报 4003。
+79. **支付宝签名有个不对称，很容易踩**：请求签名的待签名串**包含** `sign_type`；
+    异步通知验签要**同时剔除** `sign` 和 `sign_type`（官方 SDK 的 `rsaCheckV1` 就是这么做的）。
+    搞反了会一直"验签失败"。
+80. **金额单位别混**：微信是「分」，库里 `t_payment.amount` 是「元」。换算只在渠道适配层做，
+    不要把分写进库，否则对账时差 100 倍。
+81. **微信回调没有平台证书时必须拒绝**，不能"验不了就放过"——那等于谁都能伪造"支付成功"。
+    本地联调要显式开 `mall.pay.wechat.allow-unverified-notify=true`，并且日志里会打 WARN。
+82. **支付回调路径必须匿名可达**：渠道服务器不带我们的 token，把它关进鉴权里就永远收不到回调。
+    安全边界完全靠验签（支付宝 RSA2 / 微信平台证书），验不过直接抛异常，走不到改订单状态那一步。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -906,6 +919,67 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 支付：收银台 + 支付单 + 三渠道（`payment-verify.ps1` 34/34 + `web-flow` 61/61）
+
+**改动前**：`POST /order/{id}/pay` **直接把订单状态改成已支付** —— 没有支付单、没有渠道、没有回调、
+没有对账依据。用户点的那下"去支付"其实什么也没发生。
+
+**现在**的链路：
+
+```
+结算页下单 → /pay/{orderId} 收银台 → 选渠道 → POST /portal/payment 创建支付单
+     → 渠道调起（MOCK 直接成功 / 支付宝跳收银台 / 微信返回 code_url）
+     → 渠道异步回调 POST /portal/pay/notify/{channel}（验签 → 校验金额 → 幂等）
+     → 支付单 PAID + 订单 markPaid（扣库存、加销量）
+```
+
+#### 三个渠道（SPI：`PaymentChannel`，加渠道不用改业务代码）
+
+| 渠道 | 实现程度 | 需要的配置 |
+|---|---|---|
+| `MOCK` | 完整可用（本地/自动化） | 无，`mall.pay.mock-enabled=true` |
+| `ALIPAY_WAP` | **真实签名/验签**（RSA2 = SHA256withRSA），生成收银台 URL | appId、应用私钥、支付宝公钥、公网 notify_url |
+| `WECHAT_NATIVE` | **真实 v3 签名**（WECHATPAY2-SHA256-RSA2048）+ 回调解密（AES-256-GCM） | mchId、证书序列号、商户私钥、APIv3 密钥、平台证书 |
+
+> **没有商户资质，线上真实收款无法自测**，这点必须说清楚。但签名层不是"写个样子"：
+> 单测用自签 RSA 密钥对验证了「生成的支付链接/授权头能被公钥验过、改一个字节就验不过」，
+> 以及微信回调报文能被 APIv3 密钥正确 AES-GCM 解密。把环境变量配好即可切到真实渠道。
+
+#### 三条不变式（都有断言守着）
+
+1. 只有「待支付」的支付单能变「已支付」—— 条件 UPDATE + 影响行数；渠道重复回调**不会重复扣库存**
+2. 回调金额必须等于支付单金额（4004），防中间人改价
+3. 一笔订单同时只有一个待支付单 —— 重新发起时先关掉旧的，避免"两笔都能付成功"
+
+#### prod 自检
+
+`mall.pay.mock-enabled` 在 prod **必须为 false**：模拟渠道调一个接口就能把订单标成已支付，
+留在 prod 等于白送商品。`ProductionConfigGuard` 会在启动时直接失败。
+
+#### 验证（节选）
+
+```
+[PASS] A2 unconfigured channels are hidden (no alipay/wechat without credentials)
+[PASS] B2 amount equals order payAmount (100.00)
+[PASS] B5 unconfigured channel is rejected (4001)
+[PASS] C4 stock deducted exactly once (-2) :: stock 100 -> 98
+[PASS] C6 paying twice is idempotent (no extra stock deduction) :: stock 98 -> 98
+[PASS] D1 the older pending payment was closed (2)
+[PASS] D3 a closed payment cannot be paid (4003)      <- 第一次跑出来的真 bug
+[PASS] E1 forged alipay notify is rejected            <- 伪造回调改不了订单
+[PASS] G3 legacy pay also leaves a paid payment record (unified flow)
+```
+
+UI 侧（`web-flow` 57 → **61/61**）：
+
+```
+[PASS] 提交订单后进入收银台（而不是直接标记已支付） :: hash=#/pay/238
+[PASS] 收银台只列出已配置的渠道（模拟支付）
+[PASS] 未配置的支付宝/微信不出现在收银台
+[PASS] 收银台支付成功（模拟渠道）
+[PASS] 支付单已落库：status=1 且 channel=MOCK :: row=1|MOCK
+```
 
 ### 售后：退款 / 退货退款（`after-sale-verify.ps1` 44/44 + `web-flow` 11 条 UI 断言）
 
@@ -1312,6 +1386,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 本地部署测试（Docker） | ✅ | 见下方「本地部署测试」；`deploy-verify.sh` **36/36** + `deploy-browser-check.mjs` **8/8** |
 | 购物流程手感优化 | ✅ | 见下方「购物流程手感优化」；`web-flow` **57/57** |
 | 售后（退款 / 退货退款） | ✅ | 见下方「售后」；`after-sale-verify.ps1` **44/44** + UI 11 条 |
+| 支付（收银台 / 支付单 / 三渠道） | ✅ | 见下方「支付」；`payment-verify.ps1` **34/34** + UI 6 条 |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）
