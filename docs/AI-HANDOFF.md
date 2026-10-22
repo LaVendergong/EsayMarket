@@ -106,8 +106,8 @@ D:\projects\mall\
 │   ├── auth-cookie-verify.ps1    登录态验证（27 项断言：HttpOnly / SameSite / CSRF 双提交 / 退出清理 / 两应用隔离）
 │   ├── crypto-rotate-verify.ps1  密钥轮换演练（28 项断言：换密钥→旧数据仍可读→重加密→去掉旧密钥仍可读→还原）
 │   ├── token-lifecycle-verify.ps1 令牌生命周期（26 项断言：access 真过期 / refresh 轮换 / 重放失败 / 登出吊销）
-│   ├── deploy-verify.sh          部署验证（36 项：容器/迁移/prod 行为/Cookie/nginx/端到端；在容器栈上跑）
-│   ├── deploy-browser-check.mjs  部署后浏览器冒烟（8 项：UI 登录 + Secure Cookie 是否被浏览器接受）
+│   ├── deploy-verify.sh          部署验证（51 项：容器/迁移/prod 行为/Cookie/nginx/端到端/资金链路；在容器栈上跑）
+│   ├── deploy-browser-check.mjs  部署后浏览器冒烟（9 项：UI 登录 + Secure Cookie + 渲染中文不乱码）
 │   ├── backup-db.ps1             数据库逻辑备份（mysqldump 一致性快照，保留最近 N 份）
 │   ├── restore-db.ps1            从备份恢复（默认恢复到临时库，覆盖 mall 必须 -Force）
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
@@ -812,7 +812,19 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
      那不是业务错误。把脚本噪音算成失败，会掩盖真正的问题。
 109. **`mvn -DforkCount=0` 不能用来绕 surefire 崩溃**：测试跑在 Maven 进程里时
      Mockito 的 MockMaker 初始化失败（72 个 error）。fork 起不来的真因通常是内存不足，
-     正确做法是回收内存（本项目是关掉 WSL 虚拟机）再正常构建。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+     正确做法是回收内存（本项目是关掉 WSL 虚拟机）再正常构建。110. **MySQL 官方镜像按「字典序」执行 initdb 的 *.sql**：`V1, V10, V11, ..., V2`。
+     V1..V9 时字典序恰好等于数字序，**加两位数版本号那天才会炸**（本仓库实测：
+     V10 报 `Table 'mall.t_after_sale' doesn't exist`，且 `t_order` 根本没建出来）。
+     修法：只挂一个自己写的 initdb 脚本，内部用 `ls | sort -V` 按数字序执行。
+111. **CI 的迁移循环是手写顺序的，会掩盖上面那个问题**：CI 里 `for f in V1..V13` 永远是对的，
+     所以"CI 全绿"不能证明部署能起来。这类必须靠真跑一遍容器才发现。
+112. **prod 自检和本地部署栈会打架**：自检（prod 禁止模拟支付）是对的，但本地栈需要它跑通资金链路。
+     正确解法是给本地栈一个**显式 profile**（`prod,localtest`），而不是把自检放宽或再加一个 env 开关——
+     profile 名本身就是"我在跑本地容器栈"的声明。
+113. **`Environment.getActiveProfiles()` 可能返回 null**：`Arrays.asList(null)` 直接 NPE，
+     把"应该抛 IllegalStateException"的断言变成"抛了别的异常"，排查时很迷惑。用之前判空。
+114. **只测接口不测构建产物，前端漏打包也是"全绿"**：Vite 按组件名切 chunk，
+     直接在镜像里 `ls assets | grep ReconcileView` 就能确认新页面真的进了产物。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -973,6 +985,84 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 部署重跑：V10 之后 initdb 顺序崩了（`deploy-verify.sh` 51/51）
+
+上一轮 Docker 部署验证只覆盖到 V8。之后加了 V9~V13，所以整个栈重新构建、数据卷重建，
+让 initdb 从空库跑一遍。**抓到两个只会在"真部署"里出现的问题。**
+
+#### bug 1：`V10` 跑到了 `V2` 前面（迁移顺序）
+
+```
+[Entrypoint]: running /docker-entrypoint-initdb.d/V10__refund_to_channel.sql
+ERROR 1146 (42S02): Table 'mall.t_after_sale' doesn't exist
+```
+
+MySQL 官方镜像只是按 **glob 字典序**执行 `*.sql`：
+
+```
+V1, V10, V11, V12, V13, V2, V3, ...
+```
+
+V1..V9 时字典序恰好等于数字序，所以这个问题**一直到加了两位数版本号才暴露**。后果是
+迁移报错、`t_order` 等表根本没建出来，后端启动后每个查询都炸（容器重启循环）。
+
+修法：`sql` 目录挂到 `/opt/mall-sql`，只把 `deploy/initdb.sh` 挂进 initdb 目录，
+由它用 `sort -V` 按**数字序**执行：
+
+```
+[initdb] applying V1__schema.sql
+...
+[initdb] applying V13__reconcile_diff_handle.sql
+[initdb] all migrations applied (13 files)
+```
+
+> CI 里是手写 `for f in sql/V1..V13` 的，所以**CI 一直是对的**——它会掩盖这个问题。
+> 这类"部署环境与 CI 行为不一致"的坑，只能靠真跑一遍容器。
+
+#### bug 2：prod 自检把本地部署栈拦死了
+
+给钱加上「prod 禁止模拟支付」的自检后，容器起不来：
+
+```
+IllegalStateException: [prod 启动自检失败] mall.pay.mock-enabled 必须为 false
+```
+
+自检本身是对的（模拟支付在 prod 等于白送商品）。但本地部署栈又确实需要模拟支付才能跑通资金链路。
+
+修法：**不改自检强度**，改成给本地栈一个显式 profile：
+
+- `docker-compose.localtest.yml` → `SPRING_PROFILES_ACTIVE: prod,localtest`
+- `docker-compose.yml`（生产编排）→ 仍然是 `prod`，自检照旧
+- `ProductionConfigGuard.checkMockPayment()`：只有激活 `localtest` 才放行，并打 WARN
+
+用 profile 而不是"再加一个环境变量开关"，是因为 profile 名本身就是"我在跑本地容器栈"的声明，
+比随手复制一行 env 更难误开到真生产。
+
+> 顺带修了个 NPE：`env.getActiveProfiles()` 在某些 mock 环境下返回 null，
+> `Arrays.asList(null)` 直接 NPE，把"应该抛 IllegalStateException"的断言变成了"没抛对异常"。
+
+#### 验证（51/51）
+
+新增 **I 组：资金链路在容器里真的通**（9 条）+ 2 条构建产物断言：
+
+```
+== I) money chain: pay -> refund -> reconcile (on the deployed stack) ==
+[PASS] I admin login on the deployed stack :: code=200
+[PASS] I only configured channels are offered (MOCK in dev)
+[PASS] I payment order created :: paymentNo=P20261022063912442269
+[PASS] I payment settled (1|MOCK) :: row=1|MOCK
+[PASS] I order became PAID(1) after payment :: status=1
+[PASS] I after-sale applied :: id=2 code=200
+[PASS] I refund really executed through the channel (2|MOCK) :: row=2|MOCK
+[PASS] I order became REFUNDED(6) :: status=6
+[PASS] I reconcile accepted the bill and matched the payment :: matched=1 amount=7999.00
+[PASS] I admin bundle contains the reconcile page :: assets=25
+[PASS] I portal bundle contains the cashier and after-sale pages :: assets=41
+```
+
+最后两条是刻意的：**只测接口的话，前端漏打包照样"全绿"**。Vite 按组件名切 chunk，
+所以直接在镜像里查 `ReconcileView-*.js` / `CashierView-*.js` 是否存在。
 
 ### 压测基线（`load-test.mjs` 14/14，抓到一个真 bug）
 
@@ -1489,9 +1579,9 @@ cp /mnt/d/projects/mall/.env.example .env      # 填三个密钥
 docker compose -p malltest -f docker-compose.localtest.yml up -d --build
 
 # 4) 验证
-bash scripts/deploy-verify.sh                                   # 36 项：容器/迁移/prod 行为/Cookie/nginx/端到端
+bash scripts/deploy-verify.sh                                   # 51 项：容器/迁移/prod 行为/Cookie/nginx/端到端
 PORTAL_WEB=http://localhost:15174 PORTAL_API=http://localhost:18090 \
-  node scripts/deploy-browser-check.mjs                          # 8 项：真浏览器登录
+  node scripts/deploy-browser-check.mjs                          # 9 项：真浏览器登录
 ```
 
 产物：H5 `http://localhost:15174`、后台 `http://localhost:15173`。
@@ -1759,7 +1849,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | PII 加密密钥轮换（双密钥 + 重加密） | ✅ | 见下方「密钥轮换」；`crypto-rotate-verify.ps1` **28/28** |
 | 令牌生命周期（短 access + 可吊销 refresh） | ✅ | 见下方「令牌生命周期」；`token-lifecycle-verify.ps1` **26/26** |
 | HTTPS 传输加密 | ⚠️ | 只给了模板 `deploy/nginx-tls.conf.example`，本机没有 nginx/证书无法验证；但**部署测试已确认 prod 的 Secure Cookie 与安全响应头在真实容器里生效** |
-| 本地部署测试（Docker） | ✅ | 见下方「本地部署测试」；`deploy-verify.sh` **36/36** + `deploy-browser-check.mjs` **8/8** |
+| 本地部署测试（Docker） | ✅ | 见下方「本地部署测试」；`deploy-verify.sh` **51/51** + `deploy-browser-check.mjs` **9/9** |
 | 购物流程手感优化 | ✅ | 见下方「购物流程手感优化」；`web-flow` **57/57** |
 | 售后（退款 / 退货退款） | ✅ | 见下方「售后」；`after-sale-verify.ps1` **44/44** + UI 11 条 |
 | 支付（收银台 / 支付单 / 三渠道） | ✅ | 见下方「支付」；`payment-verify.ps1` **34/34** + UI 6 条 |

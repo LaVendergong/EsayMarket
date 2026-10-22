@@ -45,8 +45,10 @@ services:
       - "3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
-      # initdb 按文件名排序执行：V1__schema → V2 → V3(演示数据) → V4(索引) → V5(幂等键)
-      - ./sql:/docker-entrypoint-initdb.d:ro
+      - ./sql:/opt/mall-sql:ro
+      # 只挂「按版本号数字排序」的执行脚本，不直接挂 sql 目录：
+      # 官方 entrypoint 按 glob 字典序跑 *.sql，V10 会跑到 V2 前面（部署测试抓到过）
+      - ./deploy/initdb.sh:/docker-entrypoint-initdb.d/01-migrate.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 10s

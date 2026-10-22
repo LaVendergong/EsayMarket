@@ -103,6 +103,23 @@ class ProductionConfigGuardTest {
     }
 
     @Test
+    void prod_withLocaltestProfile_allowsMockPayment() {
+        Map<String, String> props = new HashMap<>();
+        props.put("mall.jwt.secret", GOOD_SECRET);
+        props.put("spring.datasource.password", GOOD_PASSWORD);
+        props.put("mall.crypto.secret", GOOD_CRYPTO);
+        props.put("mall.security.cookie.secure", "true");
+        props.put("mall.pay.mock-enabled", "true");
+        Environment env = mock(Environment.class);
+        when(env.acceptsProfiles(any(Profiles.class))).thenReturn(true);
+        // 只有 docker-compose.localtest.yml 才会激活 localtest；真实生产不会
+        when(env.getActiveProfiles()).thenReturn(new String[]{"prod", "localtest"});
+        when(env.getProperty(anyString())).thenAnswer(inv -> props.get(inv.getArgument(0, String.class)));
+
+        assertThatCode(() -> new ProductionConfigGuard(env).check()).doesNotThrowAnyException();
+    }
+
+    @Test
     void prod_withInsecureCookie_isRejected() {
         // 用反射之外的简单办法：直接换一个 env，把 cookie.secure 改成 false
         Map<String, String> props = new HashMap<>();

@@ -4,11 +4,12 @@
 #
 # 这套检查回答的是「部署出来到底对不对」，和单元测试/接口测试是不同维度：
 #   A) 5 个容器都起来了，mysql 健康
-#   B) initdb 的 V1..V7 迁移真的执行了（新库、空数据卷）
+#   B) initdb 的 V1..V13 迁移真的执行了（新库、空数据卷）
 #   C) prod profile 真的生效：接口文档关闭、actuator 只留 health+prometheus
 #   D) prod 下的 Cookie 是 Secure + HttpOnly + SameSite
 #   E) nginx 容器真的在服务构建产物，并且 /api 反代到后端
 #   F) 部署环境端到端跑一单：注册→地址→下单，库里密文、接口明文
+#   I) 资金链路在容器里真的通：创建支付单→支付→申请售后→渠道退款→对账
 #
 # 前置：docker compose -p malltest -f docker-compose.localtest.yml up -d --build
 # 用法：bash scripts/deploy-verify.sh
@@ -164,8 +165,68 @@ detail=$(curl -s -m 15 "$PORTAL_API/api/v1/portal/order/$order_id" -H "$AT")
 check "F order detail returns decrypted receiver" "$(printf '%s' "$detail" | grep -q 'Deploy Recv' && echo 1 || echo 0)" ''
 check "F order detail leaks no ciphertext" "$(printf '%s' "$detail" | grep -q 'enc:v1:' && echo 0 || echo 1)" ''
 
+echo ""
+echo "== I) money chain: pay -> refund -> reconcile (on the deployed stack) =="
+ATADM_FILE="/tmp/deploy-admin-token-$"
+ADM=$(curl -s -m 15 -X POST "$ADMIN_API/api/v1/admin/auth/login" -H 'Content-Type: application/json' \
+  -d '{"username":"malladmin","password":"admin123456"}')
+adm_tok=$(printf '%s' "$ADM" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -1)
+check "I admin login on the deployed stack" "$([ -n "$adm_tok" ] && echo 1 || echo 0)" "code=$(code_of "$ADM")"
+ATADM="Authorization: Bearer $adm_tok"
+rc_max=$(sql "SELECT IFNULL(MAX(id),0) FROM t_reconcile_batch;")
+
+channels=$(curl -s -m 15 "$PORTAL_API/api/v1/portal/payment/channels" -H "$AT")
+check "I only configured channels are offered (MOCK in dev)" \
+  "$(printf '%s' "$channels" | grep -q '"MOCK"' && echo 1 || echo 0)" "code=$(code_of "$channels")"
+
+pay=$(curl -s -m 15 -X POST "$PORTAL_API/api/v1/portal/payment" -H "$AT" -H 'Content-Type: application/json' \
+  -d "{\"orderId\":$order_id,\"channel\":\"MOCK\"}")
+pay_no=$(printf '%s' "$pay" | sed -n 's/.*"paymentNo":"\([^"]*\)".*/\1/p' | head -1)
+check "I payment order created" "$([ -n "$pay_no" ] && echo 1 || echo 0)" "paymentNo=$pay_no code=$(code_of "$pay")"
+
+curl -s -m 15 -X POST "$PORTAL_API/api/v1/portal/payment/$pay_no/mock-pay" -H "$AT" >/dev/null
+pay_row=$(sql "SELECT CONCAT(status,'|',channel) FROM t_payment WHERE payment_no='$pay_no';")
+check "I payment settled (1|MOCK)" "$([ "$pay_row" = "1|MOCK" ] && echo 1 || echo 0)" "row=$pay_row"
+ord_status=$(sql "SELECT status FROM t_order WHERE id=$order_id;")
+check "I order became PAID(1) after payment" "$([ "$ord_status" = "1" ] && echo 1 || echo 0)" "status=$ord_status"
+
+as_apply=$(curl -s -m 15 -X POST "$PORTAL_API/api/v1/portal/after-sale" -H "$AT" -H 'Content-Type: application/json' \
+  -d "{\"orderId\":$order_id,\"type\":1,\"reason\":\"部署验证\"}")
+as_id=$(printf '%s' "$as_apply" | sed -n 's/.*"data":\([0-9]*\).*/\1/p' | head -1)
+check "I after-sale applied" "$([ -n "$as_id" ] && echo 1 || echo 0)" "id=$as_id code=$(code_of "$as_apply")"
+
+curl -s -m 15 -X POST "$ADMIN_API/api/v1/admin/after-sale/$as_id/approve" -H "$ATADM" \
+  -H 'Content-Type: application/json' -d '{"remark":"deploy ok"}' >/dev/null
+refund_row=$(sql "SELECT CONCAT(refund_status,'|',IFNULL(refund_channel,'-')) FROM t_after_sale WHERE id=$as_id;")
+check "I refund really executed through the channel (2|MOCK)" "$([ "$refund_row" = "2|MOCK" ] && echo 1 || echo 0)" "row=$refund_row"
+ord_after_refund=$(sql "SELECT status FROM t_order WHERE id=$order_id;")
+check "I order became REFUNDED(6)" "$([ "$ord_after_refund" = "6" ] && echo 1 || echo 0)" "status=$ord_after_refund"
+
+# 对账：账单里放这笔收款，金额与订单实付一致，应当匹配上
+amount=$(sql "SELECT pay_amount FROM t_order WHERE id=$order_id;")
+bill_date=$(sql "SELECT DATE(paid_time) FROM t_payment WHERE payment_no='$pay_no';")
+bill="out_trade_no,channel_trade_no,amount,status,biz_type,refund_no
+$pay_no,DT-$STAMP,$amount,SUCCESS,PAY,"
+content=$(printf '%s' "$bill" | sed ':a;N;$!ba;s/\n/\\n/g')
+rec=$(curl -s -m 20 -X POST "$ADMIN_API/api/v1/admin/reconcile" -H "$ATADM" -H 'Content-Type: application/json' \
+  -d "{\"channel\":\"MOCK\",\"billDate\":\"$bill_date\",\"content\":\"$content\"}")
+matched=$(printf '%s' "$rec" | sed -n 's/.*"matched":\([0-9]*\).*/\1/p' | head -1)
+check "I reconcile accepted the bill and matched the payment" \
+  "$([ "$(code_of "$rec")" = "200" ] && [ "${matched:-0}" -ge 1 ] && echo 1 || echo 0)" \
+  "code=$(code_of "$rec") matched=${matched:-0} amount=$amount"
+
+# 新增的页面必须真的进到构建产物里（Vite 按组件名切 chunk）：
+# 只测接口的话，前端漏打包也照样"全绿"。
+admin_chunks=$(docker exec malltest-admin-web-1 ls /usr/share/nginx/html/assets 2>/dev/null | tr '\n' ' ')
+check "I admin bundle contains the reconcile page" \
+  "$(printf '%s' "$admin_chunks" | grep -q 'ReconcileView' && echo 1 || echo 0)" "assets=$(printf '%s' "$admin_chunks" | wc -w)"
+portal_chunks=$(docker exec malltest-portal-web-1 ls /usr/share/nginx/html/assets 2>/dev/null | tr '\n' ' ')
+check "I portal bundle contains the cashier and after-sale pages" \
+  "$(printf '%s' "$portal_chunks" | grep -q 'CashierView' && printf '%s' "$portal_chunks" | grep -q 'AfterSaleDetailView' && echo 1 || echo 0)" \
+  "assets=$(printf '%s' "$portal_chunks" | wc -w)"
+
 user_id=$(sql "SELECT id FROM t_user WHERE username='$BUYER';")
-sql "DELETE FROM t_order_item WHERE order_id=$order_id; DELETE FROM t_order WHERE id=$order_id; DELETE FROM t_cart WHERE user_id=$user_id; DELETE FROM t_address WHERE user_id=$user_id; DELETE FROM t_refresh_token WHERE user_id=$user_id; DELETE FROM t_user WHERE id=$user_id;" >/dev/null
+sql "DELETE FROM t_after_sale WHERE user_id=$user_id; DELETE FROM t_payment WHERE user_id=$user_id; DELETE FROM t_order_item WHERE order_id=$order_id; DELETE FROM t_order WHERE id=$order_id; DELETE FROM t_cart WHERE user_id=$user_id; DELETE FROM t_address WHERE user_id=$user_id; DELETE FROM t_refresh_token WHERE user_id=$user_id; DELETE FROM t_user WHERE id=$user_id; DELETE FROM t_reconcile_diff WHERE batch_id>$rc_max; DELETE FROM t_reconcile_batch WHERE id>$rc_max;" >/dev/null
 left=$(sql "SELECT COUNT(*) FROM t_user WHERE username='$BUYER';")
 check "G cleanup left nothing behind" "$([ "${left:-1}" = "0" ] && echo 1 || echo 0)" "leftover=$left"
 

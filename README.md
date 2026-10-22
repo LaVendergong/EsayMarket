@@ -130,7 +130,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/crypto-rotate-verify
 # 令牌生命周期（26 项断言：access 5 秒真过期 / refresh 轮换 / 重放失败 / 登出吊销；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/token-lifecycle-verify.ps1
 
-# 部署验证（36 项：对着 docker 容器栈跑；需要先起 docker-compose.localtest.yml，见 docs）
+# 部署验证（51 项：对着 docker 容器栈跑，含迁移顺序 / 中文 / 资金链路 / 构建产物；需先起 docker-compose.localtest.yml）
 bash scripts/deploy-verify.sh
 
 # 商品域端到端（36 项断言）
@@ -227,7 +227,11 @@ prod 下的行为差异：
   后台也可手动 `POST /admin/payment/{paymentNo}/sync`；**只有渠道确认收款才落账**。
   「退款中」会被三条路径收敛：微信退款通知（`/portal/pay/refund-notify/{channel}`）、
   每 5 分钟的 `RefundReconcileTask` 主动查单、后台售后的「查询退款」手动触发。  入口：订单详情、我的 → 我的售后；后台「售后处理」菜单。
-- **备份**：`scripts/backup-db.ps1` 做一致性快照（保留最近 7 份）；`scripts/backup-restore-verify.ps1`
+- **部署**：`docker-compose.localtest.yml` 起 5 个容器（mysql / 两个后端 / 两个前端）。
+  注意 initdb 走 `deploy/initdb.sh` 按**版本号数字序**执行迁移 —— 官方镜像默认是字典序，
+  会把 `V10` 排到 `V2` 前面（见 docs §8 第 110 条）。本地栈用 `prod,localtest` 两个 profile，
+  生产编排仍是 `prod`（模拟支付会被启动自检拦死）。
+- **备份**：- **备份**：`scripts/backup-db.ps1` 做一致性快照（保留最近 7 份）；`scripts/backup-restore-verify.ps1`
   会真的备份→恢复到临时库→逐表比对→清理，用来证明「备份能恢复」。**没有恢复过的备份不算备份。**
 - **监控**：两个后端都暴露 `/actuator/prometheus`（JVM / 连接池 / HTTP 指标 + 两个业务计数器）。
   最值得配的两条告警是 `rate(mall_orders_created_total[5m]) == 0`（营业时段下单掉到 0 = 链路断了）

@@ -98,10 +98,20 @@ public class ProductionConfigGuard {
      */
     private void checkMockPayment() {
         String mock = env.getProperty("mall.pay.mock-enabled");
-        if ("true".equalsIgnoreCase(mock)) {
-            throw new IllegalStateException("[prod 启动自检失败] mall.pay.mock-enabled 必须为 false："
-                    + "模拟支付渠道不需要真实付款就能把订单标成已支付，prod 打开等于白送商品");
+        if (!"true".equalsIgnoreCase(mock)) {
+            return;
         }
+        // 唯一的例外：显式激活 localtest profile（只有 docker-compose.localtest.yml 会这么配）。
+        // 不用"再加一个环境变量"的开关，是因为 profile 名本身就是"我在跑本地容器栈"的声明，
+        // 比随手复制一行 env 更难误开到真生产；而且这里会打 WARN。
+        // 注意用 getActiveProfiles 而不是 acceptsProfiles：前者语义更直白（就是"当前激活了哪些"）。
+        String[] activeProfiles = env.getActiveProfiles();
+        if (activeProfiles != null && java.util.Arrays.asList(activeProfiles).contains("localtest")) {
+            log.warn("[prod 自检] localtest profile 生效：允许开启模拟支付渠道（仅供本地部署测试，切勿用于生产）");
+            return;
+        }
+        throw new IllegalStateException("[prod 启动自检失败] mall.pay.mock-enabled 必须为 false："
+                + "模拟支付渠道不需要真实付款就能把订单标成已支付，prod 打开等于白送商品");
     }
 
     /**
