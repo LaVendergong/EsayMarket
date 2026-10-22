@@ -40,3 +40,6 @@ application-local.yml
 *.local.yml
 .env
 .env.local
+
+# 本地自签证书（scripts/gen-certs.sh 生成，绝不入库）
+deploy/certs/

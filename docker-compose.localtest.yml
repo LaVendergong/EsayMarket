@@ -120,7 +120,18 @@ services:
     image: mall/admin-web:localtest
     mem_limit: 64m
     ports:
-      - "15173:80"
+      # 443 是 https 入口；80 只做 http -> https 跳转
+      - "15173:443"
+      - "15177:80"
+    volumes:
+      # 用官方镜像的 templates 机制：启动时 envsubst 生成 default.conf，
+      # 覆盖 Dockerfile 里那份纯 http 的配置
+      - ./deploy/nginx-tls.template:/etc/nginx/templates/default.conf.template:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+    environment:
+      UPSTREAM: mall-admin:8081
+      # 跳转要带上宿主机映射的端口，否则会跳到 443（容器内），浏览器连不上
+      HTTPS_PORT: "15173"
     depends_on:
       - mall-admin
     restart: unless-stopped
@@ -132,7 +143,14 @@ services:
     image: mall/portal-web:localtest
     mem_limit: 64m
     ports:
-      - "15174:80"
+      - "15174:443"
+      - "15176:80"
+    volumes:
+      - ./deploy/nginx-tls.template:/etc/nginx/templates/default.conf.template:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+    environment:
+      UPSTREAM: mall-portal:8090
+      HTTPS_PORT: "15174"
     depends_on:
       - mall-portal
     restart: unless-stopped

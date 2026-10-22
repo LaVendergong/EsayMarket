@@ -19,7 +19,9 @@ export async function launch({
   chromePath = DEFAULT_CHROME,
   width = 420,
   height = 900,
-  headless = true
+  headless = true,
+  /** 额外 Chrome 参数（例如自签证书场景的 --ignore-certificate-errors） */
+  extraArgs = []
 } = {}) {
   if (!existsSync(chromePath)) {
     throw new Error(`找不到 Chrome：${chromePath}`)
@@ -41,7 +43,8 @@ export async function launch({
     '--no-default-browser-check',
     '--disable-extensions',
     `--window-size=${width},${height}`,
-    `--remote-debugging-port=${port}`
+    `--remote-debugging-port=${port}`,
+    ...extraArgs
   ]
   if (profileDir) args.push(`--user-data-dir=${profileDir}`)
   args.push('about:blank')

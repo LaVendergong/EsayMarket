@@ -59,6 +59,11 @@ if ("$runningRaw" -match '(\d+)') { $running = [int]$Matches[1] }
 if ($running -ge 5) {
     Write-Host ("  栈已在运行（{0} 个容器），跳过内存检查与启动" -f $running) -ForegroundColor Green
 } else {
+    # 容器没在跑时，WSL 虚拟机本身还可能占着 2~3GB（vmmemWSL 不会自己退）。
+    # 先关掉它，才能看到"真实可用内存"，否则会被自己的空占误判成内存不足。
+    & wsl --shutdown 2>&1 | Out-Null
+    Start-Sleep -Seconds 6
+
     $free = Get-FreeMb
     Write-Host ("  可用内存 {0:N0} MB（建议 >= {1:N0} MB）" -f $free, $MinFreeMb)
     if ($free -lt $MinFreeMb -and -not $Force) {
@@ -79,6 +84,10 @@ tar -C /mnt/d/projects/mall --exclude=node_modules --exclude=target --exclude=.g
 echo "  synced, sql files: $(ls /root/mallbuild/sql/V*.sql | wc -l)"
 '@
 
+    Write-Host '== 2.5) 生成自签证书（前端容器用 https）==' -ForegroundColor Cyan
+    # 幂等：已有证书就跳过。真实证书上线时替换 deploy/certs 即可。
+    Invoke-WslScript 'deploy-certs.sh' "bash /mnt/d/projects/mall/scripts/gen-certs.sh"
+
     Write-Host '== 3) 启动容器 ==' -ForegroundColor Cyan
     $upArgs = if ($Build) { 'up -d --build' } else { 'up -d' }
     $out = & wsl -u root -e bash -c "cd /root/mallbuild && docker compose $composeArgs $upArgs 2>&1 | tail -6"
@@ -95,16 +104,18 @@ if (-not (Wait-Healthy)) {
 Write-Host '  portal/admin 健康' -ForegroundColor Green
 
 Write-Host '== 5) 检查 Windows 侧的页面端口 ==' -ForegroundColor Cyan
+# 前端现在是 **https**（自签证书），所以检查必须用 https + -k；
+# 用 http 去测会得到 nginx 的 400「plain HTTP to HTTPS port」，被误判成转发断了。
 $httpOk = {
     param($url)
     try {
-        $code = (curl.exe -s -o NUL -w '%{http_code}' -m 8 $url 2>$null)
+        $code = (curl.exe -s -k -o NUL -w '%{http_code}' -m 8 $url 2>$null)
         return $code -eq '200'
     } catch { return $false }
 }
 
-if ((& $httpOk 'http://localhost:15174/') -and (& $httpOk 'http://localhost:15173/')) {
-    Write-Host '  端口转发正常' -ForegroundColor Green
+if ((& $httpOk 'https://localhost:15174/') -and (& $httpOk 'https://localhost:15173/')) {
+    Write-Host '  端口转发正常（https）' -ForegroundColor Green
 } else {
     # 这是本机真实踩过的坑：容器在跑，但 WSL 重启后 localhost 转发没接上
     Write-Host '  页面端口不通（容器在跑，但 Windows -> WSL 转发断了），重启 WSL 自愈…' -ForegroundColor Yellow
@@ -113,13 +124,12 @@ if ((& $httpOk 'http://localhost:15174/') -and (& $httpOk 'http://localhost:1517
     & wsl -u root -e bash -c "cd /root/mallbuild && docker compose $composeArgs up -d 2>&1 | tail -3" |
         Where-Object { $_ -notmatch '检测到|妫€娴' } | ForEach-Object { '  ' + $_ }
     $null = Wait-Healthy
-    if ((& $httpOk 'http://localhost:15174/') -and (& $httpOk 'http://localhost:15173/')) {
+    if ((& $httpOk 'https://localhost:15174/') -and (& $httpOk 'https://localhost:15173/')) {
         Write-Host '  转发已恢复' -ForegroundColor Green
     } else {
         Write-Host '  仍未恢复。可以在浏览器里直接用 WSL 的 IP：' -ForegroundColor Red
-        & wsl -u root -e hostname -I | Where-Object { $_ -match '^\d' } | ForEach-Object {
-            Write-Host ("    http://{0}:15174   http://{0}:15173" -f $_.Trim()) -ForegroundColor Red
-        }
+        $wslIp = ((& wsl -u root -e hostname -I) -split '\s+' | Where-Object { $_ -match '^\d' } | Select-Object -First 1)
+        Write-Host ("    https://{0}:15174   https://{0}:15173" -f $wslIp) -ForegroundColor Red
         exit 1
     }
 }

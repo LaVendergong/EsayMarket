@@ -130,11 +130,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/crypto-rotate-verify
 # 令牌生命周期（26 项断言：access 5 秒真过期 / refresh 轮换 / 重放失败 / 登出吊销；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/token-lifecycle-verify.ps1
 
+# 容器版前端已经是 https（自签证书，由 scripts/gen-certs.sh 生成；浏览器会有证书警告）
 # 起容器版（内存不足会先拦下；起完自动检查 Windows 能否打开页面，转发断了会自愈）
 powershell -ExecutionPolicy Bypass -File scripts/deploy-up.ps1
 # 停容器版并释放内存（-Purge 连数据卷一起删，下次启动会重跑 V1..V13）
 powershell -ExecutionPolicy Bypass -File scripts/deploy-down.ps1
-# 部署验证（51 项：对着 docker 容器栈跑，含迁移顺序 / 中文 / 资金链路 / 构建产物；需先起 docker-compose.localtest.yml）
+# 部署验证（54 项：容器栈上跑，含迁移顺序 / 中文 / 资金链路 / 构建产物 / https+HSTS+301）
 bash scripts/deploy-verify.sh
 
 # 商品域端到端（36 项断言）

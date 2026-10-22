@@ -119,6 +119,7 @@ D:\projects\mall\
 │   ├── payment-verify.ps1        支付链路（39 项断言：支付单/渠道/幂等/回调验签/查单兜底/越权）
 │   ├── reconcile-verify.ps1      对账（35 项断言：支付+退款差异归类 / 差异处理审计 / 越权）
 │   ├── https-verify.sh           HTTPS（18 项断言：证书链 / 301 / TLS 策略 / 安全头 / 真实业务）
+│   ├── gen-certs.sh              生成容器栈用的自签 CA + 服务器证书（SAN: localhost）
 │   ├── load-test.mjs             压测基线（14 项断言：读/抢库存/支付 + 不超卖 + 延迟阈值）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
@@ -834,7 +835,15 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 117. **健康检查别从宿主机探测**：转发可能正好是坏的，会误判成"后端没起来"（第一版脚本就这么错的）。
      要 `wsl -e bash -c 'curl http://127.0.0.1:18090/actuator/health'` 在容器网络内探。
 118. **"栈已在运行"时不要用可用内存做准入门槛**：vmmemWSL 正占着那几 GB，可用内存天然就低。
-     先判断容器数量，已起就只做健康与转发自愈。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+     先判断容器数量，已起就只做健康与转发自愈。119. **前端换成 https 后，探活地址必须同步改**：`curl http://localhost:15174` 会得到 nginx 的
+     `400 The plain HTTP request was sent to HTTPS port`，脚本很容易误判成"端口转发断了"。
+120. **http -> https 跳转要带宿主机映射的端口**（`https://$host:15174`）：写死 443 会跳到容器内的 443，
+     而宿主机映射的是 15174，浏览器连不上。
+121. **nginx 官方镜像的 templates 机制**：把 `*.template` 挂到 `/etc/nginx/templates/`，
+     启动时 envsubst 生成 `conf.d/*.conf`；envsubst 只替换**已定义**的环境变量，`$host` 这类不受影响。
+122. **宿主内存耗尽会让 WSL 容器陷入"每几秒重建一次"**：`docker ps` 一直显示 `Up 9 seconds`、
+     `RestartCount=0`（容器是被重建而非 restart）、`uptime` 很小。判据是宿主 commit 接近上限。
+     这不是编排或应用问题，只能腾内存或换机器。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -1073,6 +1082,51 @@ IllegalStateException: [prod 启动自检失败] mall.pay.mock-enabled 必须为
 
 最后两条是刻意的：**只测接口的话，前端漏打包照样"全绿"**。Vite 按组件名切 chunk，
 所以直接在镜像里查 `ReconcileView-*.js` / `CashierView-*.js` 是否存在。
+
+### HTTPS 接进容器编排（`deploy-verify.sh` 54/54）
+
+之前 TLS 只是"验证过但没启用"：`https-verify.sh` 用 WSL 里的 nginx 跑通 18 项，但 compose 里前端还是 80 端口。
+这一步把它接进真实栈：**两个前端容器直接以 https 对外**，自签证书由脚本生成。
+
+#### 做法
+
+| 部分 | 说明 |
+|---|---|
+| `deploy/nginx-tls.template` | 同一份模板服务两个前端，用 nginx 官方镜像的 **templates + envsubst** 机制注入 `UPSTREAM` / `HTTPS_PORT` |
+| `scripts/gen-certs.sh` | 生成 CA + 服务器证书（SAN: localhost / mall.local / 127.0.0.1），幂等；`deploy/certs` 已 gitignore |
+| compose | 前端映射 `15174:443` / `15173:443`，另开 `15176:80` / `15177:80` 只做 301 跳转 |
+
+三个容易写错的点：
+
+1. **跳转必须带宿主机端口**：`return 301 https://$host:${HTTPS_PORT}$request_uri`。
+   写死 443 的话浏览器会去连 `https://localhost:443`，容器映射的是 15174，直接连不上。
+2. **envsubst 只替换已定义的环境变量**，所以 nginx 自己的 `$host` / `$request_uri` 不会被吃掉。
+3. **前端换成 https 后，所有探活/断言地址都要跟着改**：`curl http://localhost:15174` 会拿到 nginx 的
+   `400 The plain HTTP request was sent to HTTPS port`，脚本会误判成"端口转发断了"（这次又踩了一次）。
+
+#### 验证（54/54，比之前多 3 条）
+
+```
+[PASS] E portal is served over https :: url=https://localhost:15174
+[PASS] E HSTS header present :: strict-transport-security: max-age=31536000; includeSubDomains
+[PASS] E http is redirected to https (301) :: code=301 location=https://localhost:15176/
+```
+
+`deploy-verify.sh` 里的 curl 现在用 **`--cacert deploy/certs/ca.crt`** 校验，比 `-k` 严格：
+证书链错、主机名不匹配都会直接失败，而不是"忽略一切照跑"。
+
+#### 一个环境限制（如实记）
+
+浏览器级冒烟（`deploy-browser-check.mjs`）这次**没跑完**：容器在这台 16GB 机器上陷入
+"每 9 秒重建一次"的循环——宿主 commit 只剩 1.4GB，Windows 反复终止 vmmemWSL。
+应用层验证（54/54）是在一个稳定窗口里跑过的；浏览器级验证需要先关掉 IDEA/浏览器腾出内存，
+或者在有更多内存的机器上跑：
+
+```
+powershell -File scripts/deploy-up.ps1      # 起栈（会先检查内存）
+PORTAL_WEB=https://localhost:15174 PORTAL_API=http://localhost:18090 \
+  node scripts/deploy-browser-check.mjs
+```
 
 ### 本地部署栈的一键启停（`deploy-up.ps1` / `deploy-down.ps1`）
 
@@ -1899,6 +1953,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 支付查单兜底（回调丢失） | ✅ | 见下方「支付查单兜底」；`payment-verify.ps1` **39/39** |
 | 压测基线（并发/超卖/死锁） | ✅ | 见下方「压测基线」；`load-test.mjs` **14/14** |
 | HTTPS 落地（TLS 终止 + 安全头） | ✅ | 见下方「HTTPS 落地」；`https-verify.sh` **18/18** |
+| HTTPS 接进容器编排 | ✅ | 见下方「HTTPS 接进容器编排」；`deploy-verify.sh` **54/54** |
 | 对账（支付 + 退款逐笔比对 + 差异处理） | ✅ | 见下方「对账」；`reconcile-verify.ps1` **35/35** |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 

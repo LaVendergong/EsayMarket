@@ -20,8 +20,8 @@ set -uo pipefail
 COMPOSE_DIR="${COMPOSE_DIR:-/root/mallbuild}"
 PROJECT="${PROJECT:-malltest}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.localtest.yml}"
-PORTAL_WEB="${PORTAL_WEB:-http://localhost:15174}"
-ADMIN_WEB="${ADMIN_WEB:-http://localhost:15173}"
+PORTAL_WEB="${PORTAL_WEB:-https://localhost:15174}"
+ADMIN_WEB="${ADMIN_WEB:-https://localhost:15173}"
 PORTAL_API="${PORTAL_API:-http://localhost:18090}"
 ADMIN_API="${ADMIN_API:-http://localhost:18081}"
 STAMP="$(date +%H%M%S)"
@@ -44,6 +44,16 @@ fi
 sql() { $DC exec -T mysql mysql -uroot -p"$MYSQL_PASSWORD" -N --default-character-set=utf8mb4 -e "USE mall; $1" 2>/dev/null | tr -d '\r'; }
 
 json() { curl -s -m 15 "$@" ; }
+
+# 前端已经是 https（自签证书）。用**我们自己的 CA 校验**，比 -k 严格：
+# 证书链错、主机名不匹配都会直接失败，而不是"忽略一切照跑"。
+CA_FILE="${CA_FILE:-$COMPOSE_DIR/deploy/certs/ca.crt}"
+if [ -f "$CA_FILE" ]; then
+    curl() { command curl --cacert "$CA_FILE" "$@"; }
+else
+    echo "WARN: CA not found at $CA_FILE, https checks may fail (run scripts/gen-certs.sh)"
+fi
+
 code_of() { printf '%s' "$1" | sed -n 's/.*"code":\([0-9]*\).*/\1/p' | head -1; }
 http_of() { curl -s -o /dev/null -m 15 -w '%{http_code}' "$@"; }
 
@@ -128,6 +138,15 @@ proxied=$(json "$PORTAL_WEB/api/v1/portal/product/page?pageNum=1&pageSize=1")
 check "E nginx proxies /api to mall-portal" "$([ "$(code_of "$proxied")" = "200" ] && echo 1 || echo 0)" "code=$(code_of "$proxied")"
 abody=$(json "$ADMIN_WEB/")
 check "E admin static page served" "$(printf '%s' "$abody" | grep -q 'id="app"' && echo 1 || echo 0)" "bytes=${#abody}"
+
+# https 落地的三条：协议真的换了、HSTS 真的下发了、http 会跳过去
+hsts_hdr=$(curl -s -m 10 -D - -o /dev/null "$PORTAL_WEB/")
+check "E portal is served over https" "$(printf '%s' "$PORTAL_WEB" | grep -q '^https://' && echo 1 || echo 0)" "url=$PORTAL_WEB"
+check "E HSTS header present" "$(printf '%s' "$hsts_hdr" | grep -qi 'strict-transport-security:.*max-age=' && echo 1 || echo 0)" \
+  "$(printf '%s' "$hsts_hdr" | grep -i 'strict-transport-security' | tr -d '\r' | head -1)"
+http_code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "http://localhost:15176/")
+http_loc=$(curl -s -m 10 -o /dev/null -w '%{redirect_url}' "http://localhost:15176/")
+check "E http is redirected to https (301)" "$([ "$http_code" = "301" ] && echo 1 || echo 0)" "code=$http_code location=$http_loc"
 
 echo
 echo

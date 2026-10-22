@@ -17,7 +17,7 @@
  */
 import { launch } from './cdp.mjs'
 
-const PORTAL_WEB = process.env.PORTAL_WEB || 'http://localhost:15174'
+const PORTAL_WEB = process.env.PORTAL_WEB || 'https://localhost:15174'
 const PORTAL_API = process.env.PORTAL_API || 'http://localhost:18090'
 const STAMP = Date.now().toString().slice(-6)
 const USER = `bsmoke${STAMP}`
@@ -37,7 +37,14 @@ const reg = await fetch(`${PORTAL_API}/api/v1/portal/auth/register`, {
 }).then((r) => r.json())
 check('setup: test user registered on the deployed stack', reg.code === 200, `code=${reg.code}`)
 
-const browser = await launch({ port: 9340, profile: 'deploy-browser-profile', downloadDir: 'tmp/deploy-browser' })
+// 自签证书：容器里的 TLS 用的是本地 CA，浏览器默认会拦。
+// 这里只对这条冒烟链路忽略证书错误 —— 证书链本身由 https-verify.sh 单独验（18/18）。
+const browser = await launch({
+  port: 9340,
+  profile: 'deploy-browser-profile',
+  downloadDir: 'tmp/deploy-browser',
+  extraArgs: ['--ignore-certificate-errors']
+})
 const { goto, evalJs, innerText, waitFor, clickText, setInput, close } = browser
 
 await goto(`${PORTAL_WEB}/#/login`, 3500)
