@@ -14,4 +14,12 @@ public interface ReconcileService {
 
     /** 详情：带逐笔差异清单 */
     ReconcileBatchVO detail(Long batchId);
+
+    /**
+     * 处理一条差异（已核实 / 忽略），记审计。
+     *
+     * <p>只改差异的归档状态，**不做任何资金操作** —— 补记与重退仍走
+     * 「同步支付」「查询退款」接口。
+     */
+    ReconcileBatchVO handleDiff(Long diffId, String action, String remark, String operator);
 }

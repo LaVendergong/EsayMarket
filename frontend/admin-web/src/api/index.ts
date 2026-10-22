@@ -63,5 +63,8 @@ export const reconcileApi = {
     http.post<never, ReconcileBatchVO>('/admin/reconcile', data),
   page: (pageNum = 1, pageSize = 10) =>
     http.get<never, PageResult<ReconcileBatchVO>>('/admin/reconcile/page', { params: { pageNum, pageSize } }),
-  detail: (id: number) => http.get<never, ReconcileBatchVO>(`/admin/reconcile/${id}`)
-}
+  detail: (id: number) => http.get<never, ReconcileBatchVO>(`/admin/reconcile/${id}`),
+  /** 处理一条差异（CONFIRM / IGNORE），返回刷新后的批次 */
+  handleDiff: (diffId: number, action: string, remark?: string) =>
+    http.post<never, ReconcileBatchVO>(`/admin/reconcile/diff/${diffId}/handle`, { action, remark })
+  }

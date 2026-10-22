@@ -190,6 +190,23 @@ Check 'B5 refund mismatch carries both amounts (60 vs 55)' ($refundMismatch.loca
 $refundMissing = $refundDiffs | Where-Object { $_.diffType -eq 'MISSING_CHANNEL' }
 Check 'B6 the omitted refund is reported as missing-channel' (($refundMissing.refundNo) -contains $rf3) "refundNos=$($refundMissing.refundNo -join ',')"
 
+# ============================================================ B2) 处理差异
+Write-Host ''
+Write-Host '== B2) handle a diff =='
+$firstDiff = $diffs[0]
+$handle = Http-Json -Method POST -Url "$admin/api/v1/admin/reconcile/diff/$($firstDiff.id)/handle" -Token $adminToken -Body @{ action = 'CONFIRM'; remark = '已核实：账单口径问题' } -Name '60-handle'
+$hv = Payload $handle
+$handledDiff = $hv.diffs | Where-Object { $_.id -eq $firstDiff.id }
+Check 'B7 handling a diff marks it as handled' ((Code $handle) -eq 200 -and $handledDiff.handleStatus -eq 1) "code=$(Code $handle) status=$($handledDiff.handleStatus)"
+Check 'B8 audit fields are recorded (who / why)' ($handledDiff.handledBy -and $handledDiff.handleRemark) "by=$($handledDiff.handledBy) remark=$($handledDiff.handleRemark)"
+Check 'B9 unhandled count dropped' ($hv.unhandledCount -lt $diffs.Count) "unhandled=$($hv.unhandledCount) total=$($diffs.Count)"
+
+$again = Http-Json -Method POST -Url "$admin/api/v1/admin/reconcile/diff/$($firstDiff.id)/handle" -Token $adminToken -Body @{ action = 'IGNORE' } -Name '61-handle-again'
+Check 'B10 handling the same diff twice is rejected (400)' ((Code $again) -eq 400) "code=$(Code $again)"
+
+$badAction = Http-Json -Method POST -Url "$admin/api/v1/admin/reconcile/diff/$($diffs[1].id)/handle" -Token $adminToken -Body @{ action = 'REFUND_ALL' } -Name '62-bad-action'
+Check 'B11 unknown action is rejected (400)' ((Code $badAction) -eq 400) "code=$(Code $badAction)"
+
 # ============================================================ C) 边界与权限
 Write-Host ''
 Write-Host '== C) edge cases and permissions =='

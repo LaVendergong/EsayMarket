@@ -35,4 +35,16 @@ public class ReconcileDiff extends BaseEntity {
     private BigDecimal channelAmount;
 
     private String detail;
+
+    /** 0 待处理 1 已处理 2 已忽略 */
+    private Integer handleStatus;
+
+    /** CONFIRM（已核实处理）/ IGNORE（忽略） */
+    private String handleAction;
+
+    private String handleRemark;
+
+    private String handledBy;
+
+    private java.time.LocalDateTime handleTime;
 }

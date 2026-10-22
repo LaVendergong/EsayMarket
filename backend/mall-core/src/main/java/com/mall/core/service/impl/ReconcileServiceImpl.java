@@ -229,11 +229,54 @@ public class ReconcileServiceImpl implements ReconcileService {
     }
 
     @Override
+    @Transactional
+    public ReconcileBatchVO handleDiff(Long diffId, String action, String remark, String operator) {
+        String normalized = action == null ? "" : action.trim().toUpperCase();
+        if (!"CONFIRM".equals(normalized) && !"IGNORE".equals(normalized)) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED, "处理动作只能是 CONFIRM 或 IGNORE");
+        }
+        ReconcileDiff d = diffMapper.selectById(diffId);
+        if (d == null) {
+            throw new BusinessException(ResultCode.NOT_FOUND, "差异记录不存在");
+        }
+        // 只有"待处理"能被处理：并发/重复点击时只有一次生效（条件 UPDATE + 影响行数）
+        ReconcileDiff patch = new ReconcileDiff();
+        patch.setHandleStatus("IGNORE".equals(normalized) ? 2 : 1);
+        patch.setHandleAction(normalized);
+        patch.setHandleRemark(remark == null || remark.isBlank() ? null : remark.trim());
+        patch.setHandledBy(operator);
+        patch.setHandleTime(LocalDateTime.now());
+        int n = diffMapper.update(patch, Wrappers.<ReconcileDiff>lambdaUpdate()
+                .eq(ReconcileDiff::getId, diffId)
+                .eq(ReconcileDiff::getHandleStatus, 0));
+        if (n == 0) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED, "该差异已被处理过了");
+        }
+        log.info("[reconcile] diff handled id={} action={} by={}", diffId, normalized, operator);
+        return detail(d.getBatchId());
+    }
+
+    /** 每个批次还有几条没处理（列表用，一次分组查询，避免 N+1） */
+    private Map<Long, Integer> unhandledCounts(List<Long> batchIds) {
+        if (batchIds == null || batchIds.isEmpty()) {
+            return Map.of();
+        }
+        List<ReconcileDiff> rows = diffMapper.selectList(Wrappers.<ReconcileDiff>lambdaQuery()
+                .select(ReconcileDiff::getBatchId)
+                .in(ReconcileDiff::getBatchId, batchIds)
+                .eq(ReconcileDiff::getHandleStatus, 0));
+        return rows.stream().collect(Collectors.groupingBy(ReconcileDiff::getBatchId,
+                Collectors.summingInt(x -> 1)));
+    }
+
+    @Override
     public PageResult<ReconcileBatchVO> page(long pageNum, long pageSize) {
         IPage<ReconcileBatch> page = batchMapper.selectPage(new Page<>(pageNum, pageSize),
                 Wrappers.<ReconcileBatch>lambdaQuery().orderByDesc(ReconcileBatch::getId));
-        return PageResult.of(page.getTotal(), pageNum, pageSize,
-                page.getRecords().stream().map(ReconcileBatchVO::from).toList());
+        List<ReconcileBatchVO> vos = page.getRecords().stream().map(ReconcileBatchVO::from).toList();
+        Map<Long, Integer> counts = unhandledCounts(page.getRecords().stream().map(ReconcileBatch::getId).toList());
+        vos.forEach(v -> v.setUnhandledCount(counts.getOrDefault(v.getId(), 0)));
+        return PageResult.of(page.getTotal(), pageNum, pageSize, vos);
     }
 
     @Override
@@ -243,10 +286,13 @@ public class ReconcileServiceImpl implements ReconcileService {
             throw new BusinessException(ResultCode.NOT_FOUND, "对账批次不存在");
         }
         ReconcileBatchVO vo = ReconcileBatchVO.from(batch);
-        vo.setDiffs(diffMapper.selectList(Wrappers.<ReconcileDiff>lambdaQuery()
+        List<ReconcileDiffVO> diffs = diffMapper.selectList(Wrappers.<ReconcileDiff>lambdaQuery()
                         .eq(ReconcileDiff::getBatchId, batchId)
                         .orderByAsc(ReconcileDiff::getId))
-                .stream().map(ReconcileDiffVO::from).toList());
+                .stream().map(ReconcileDiffVO::from).toList();
+        vo.setDiffs(diffs);
+        vo.setUnhandledCount((int) diffs.stream()
+                .filter(d -> d.getHandleStatus() == null || d.getHandleStatus() == 0).count());
         return vo;
     }
 

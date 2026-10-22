@@ -2,7 +2,7 @@ name: CI
 
 # 每次 push / PR 都跑：
 #   1. backend        —— 编译 + 单元测试（纯内存，不需要数据库）
-#   2. sql-migrations —— 在全新的 MySQL 上把 V1..V12 按顺序跑一遍（等价于 docker 的 initdb 流程）
+#   2. sql-migrations —— 在全新的 MySQL 上把 V1..V13 按顺序跑一遍（等价于 docker 的 initdb 流程）
 #   3. frontend       —— 两个前端的类型检查 + 生产构建
 #
 # 说明：本机没有 Docker/GitHub Actions 环境，这个工作流**没有在 CI 上实际跑过**，
@@ -47,10 +47,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: install mysql client
         run: sudo apt-get update -qq && sudo apt-get install -y -qq mysql-client
-      - name: apply V1..V12 in order, then check the demo data landed
+      - name: apply V1..V13 in order, then check the demo data landed
         run: |
           set -e
-          for f in sql/V1__schema.sql sql/V2__add_user_role.sql sql/V3__seed_demo.sql sql/V4__order_index.sql sql/V5__order_request_id.sql sql/V6__pii_encryption.sql sql/V7__refresh_token.sql sql/V8__after_sale.sql sql/V9__payment.sql sql/V10__refund_to_channel.sql sql/V11__reconcile.sql sql/V12__reconcile_refund.sql; do
+          for f in sql/V1__schema.sql sql/V2__add_user_role.sql sql/V3__seed_demo.sql sql/V4__order_index.sql sql/V5__order_request_id.sql sql/V6__pii_encryption.sql sql/V7__refresh_token.sql sql/V8__after_sale.sql sql/V9__payment.sql sql/V10__refund_to_channel.sql sql/V11__reconcile.sql sql/V12__reconcile_refund.sql sql/V13__reconcile_diff_handle.sql; do
             echo "== applying $f"
             mysql -h 127.0.0.1 -uroot -pci-root-password --default-character-set=utf8mb4 < "$f"
           done

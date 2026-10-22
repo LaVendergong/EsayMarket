@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { reconcileApi } from '@/api'
 import type { ReconcileBatchVO } from '@/types'
 
@@ -70,6 +70,24 @@ async function loadHistory() {
   } finally {
     loading.value = false
   }
+}
+
+/** 处理一条差异：只做归档（不碰钱），资金动作仍走「同步支付 / 查询退款」 */
+async function handleDiff(row: { id: number }, action: 'CONFIRM' | 'IGNORE') {
+  let remark = ''
+  try {
+    const box = await ElMessageBox.prompt(
+      action === 'CONFIRM' ? '确认该差异已核实并处理？' : '确认忽略该差异？',
+      action === 'CONFIRM' ? '标记已处理' : '忽略差异',
+      { confirmButtonText: '确定', cancelButtonText: '取消', inputPlaceholder: '处理说明（会记入审计）' }
+    )
+    remark = result.value || ''
+  } catch {
+    return
+  }
+  result.value = await reconcileApi.handleDiff(row.id, action, remark)
+  ElMessage.success('已记录处理结果')
+  loadHistory()
 }
 
 async function openBatch(row: ReconcileBatchVO) {
@@ -165,7 +183,19 @@ onMounted(loadHistory)
         <el-table-column prop="channelTradeNo" label="渠道交易号" width="200" />
         <el-table-column prop="localAmount" label="本地金额" width="110" />
         <el-table-column prop="channelAmount" label="账单金额" width="110" />
-        <el-table-column prop="detail" label="说明" min-width="220" />
+        <el-table-column prop="detail" label="说明" min-width="200" />
+        <el-table-column label="处理" width="200">
+          <template #default="{ row }">
+            <template v-if="!row.handleStatus">
+              <el-button link type="primary" @click="handleDiff(row, 'CONFIRM')">已核实</el-button>
+              <el-button link type="warning" @click="handleDiff(row, 'IGNORE')">忽略</el-button>
+            </template>
+            <template v-else>
+              <el-tag :type="row.handleStatus === 2 ? 'info' : 'success'" size="small">{{ row.handleStatusText }}</el-tag>
+              <div class="muted">{{ row.handledBy }} {{ row.handleRemark }}</div>
+            </template>
+          </template>
+        </el-table-column>
       </el-table>
       <el-empty v-else description="没有任何差异" :image-size="60" />
     </el-card>
@@ -181,6 +211,12 @@ onMounted(loadHistory)
         <el-table-column prop="missingLocal" label="渠道有/本地无" width="130" />
         <el-table-column prop="missingChannel" label="本地有/渠道无" width="130" />
         <el-table-column prop="amountMismatch" label="金额不符" width="100" />
+        <el-table-column label="未处理" width="90">
+          <template #default="{ row }">
+            <el-tag v-if="(row.unhandledCount ?? 0) > 0" type="danger" size="small">{{ row.unhandledCount }}</el-tag>
+            <span v-else class="muted">0</span>
+          </template>
+        </el-table-column>
         <el-table-column label="结果" width="100">
           <template #default="{ row }">
             <el-tag :type="row.status === 1 ? 'success' : 'danger'">{{ row.statusText }}</el-tag>
@@ -223,6 +259,11 @@ onMounted(loadHistory)
 
 .diffs {
   margin-top: 12px;
+}
+
+.muted {
+  color: #909399;
+  font-size: 12px;
 }
 
 .bad {

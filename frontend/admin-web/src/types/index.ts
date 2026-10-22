@@ -176,6 +176,12 @@ export interface ReconcileDiffVO {
   localAmount?: number
   channelAmount?: number
   detail?: string
+  handleStatus?: number
+  handleStatusText?: string
+  handleAction?: string
+  handleRemark?: string
+  handledBy?: string
+  handleTime?: string
 }
 
 export interface ReconcileBatchVO {
@@ -196,6 +202,7 @@ export interface ReconcileBatchVO {
   refundAmountMismatch?: number
   status: number
   statusText: string
+  unhandledCount?: number
   createTime?: string
   diffs?: ReconcileDiffVO[]
 }

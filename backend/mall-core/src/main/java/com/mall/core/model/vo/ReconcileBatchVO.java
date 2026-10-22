@@ -49,6 +49,9 @@ public class ReconcileBatchVO {
 
     private LocalDateTime createTime;
 
+    /** 还有几条差异没处理（列表与详情都会填） */
+    private Integer unhandledCount;
+
     /** 只在详情里填（列表不查，避免 N+1） */
     private List<ReconcileDiffVO> diffs;
 

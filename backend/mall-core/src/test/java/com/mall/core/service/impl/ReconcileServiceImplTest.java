@@ -179,6 +179,47 @@ class ReconcileServiceImplTest {
     }
 
     @Test
+    void handleDiff_recordsAuditAndReturnsRefreshedBatch() {
+        ReconcileDiff d = new ReconcileDiff();
+        d.setId(5L);
+        d.setBatchId(99L);
+        d.setHandleStatus(0);
+        when(diffMapper.selectById(5L)).thenReturn(d);
+        when(diffMapper.update(any(), any())).thenReturn(1);
+        ReconcileBatch b = new ReconcileBatch();
+        b.setId(99L);
+        when(batchMapper.selectById(99L)).thenReturn(b);
+        when(diffMapper.selectList(any())).thenReturn(List.of());
+
+        ReconcileBatchVO vo = service.handleDiff(5L, "confirm", "已核实", "tester");
+
+        assertThat(vo.getId()).isEqualTo(99L);
+        verify(diffMapper).update(any(), any());
+    }
+
+    @Test
+    void handleDiff_rejectsSecondHandling() {
+        ReconcileDiff d = new ReconcileDiff();
+        d.setId(6L);
+        d.setBatchId(99L);
+        d.setHandleStatus(0);
+        when(diffMapper.selectById(6L)).thenReturn(d);
+        // 条件 UPDATE 影响 0 行 = 已被别人处理过
+        when(diffMapper.update(any(), any())).thenReturn(0);
+
+        assertThatThrownBy(() -> service.handleDiff(6L, "CONFIRM", null, "tester"))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("已被处理过");
+    }
+
+    @Test
+    void handleDiff_rejectsUnknownAction() {
+        assertThatThrownBy(() -> service.handleDiff(7L, "REFUND_ALL", null, "tester"))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("CONFIRM");
+    }
+
+    @Test
     void reconcile_failsLoudlyWhenBillIsEmpty() {
         // 解析不出数据时必须报错：静默生成"零差异"报告比不核对更危险
         assertThatThrownBy(() -> service.reconcile(PayChannel.MOCK.getCode(), LocalDate.now(), "garbage"))

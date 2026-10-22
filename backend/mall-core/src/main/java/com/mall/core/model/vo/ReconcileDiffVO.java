@@ -31,6 +31,18 @@ public class ReconcileDiffVO {
 
     private String detail;
 
+    private Integer handleStatus;
+
+    private String handleStatusText;
+
+    private String handleAction;
+
+    private String handleRemark;
+
+    private String handledBy;
+
+    private java.time.LocalDateTime handleTime;
+
     public static ReconcileDiffVO from(ReconcileDiff d) {
         ReconcileDiffVO vo = new ReconcileDiffVO();
         vo.setId(d.getId());
@@ -43,7 +55,20 @@ public class ReconcileDiffVO {
         vo.setLocalAmount(d.getLocalAmount());
         vo.setChannelAmount(d.getChannelAmount());
         vo.setDetail(d.getDetail());
+        vo.setHandleStatus(d.getHandleStatus() == null ? 0 : d.getHandleStatus());
+        vo.setHandleStatusText(handleText(vo.getHandleStatus()));
+        vo.setHandleAction(d.getHandleAction());
+        vo.setHandleRemark(d.getHandleRemark());
+        vo.setHandledBy(d.getHandledBy());
+        vo.setHandleTime(d.getHandleTime());
         return vo;
+    }
+
+    public static String handleText(Integer status) {
+        if (status == null || status == 0) {
+            return "待处理";
+        }
+        return status == 2 ? "已忽略" : "已处理";
     }
 
     public static String textOf(String type) {
