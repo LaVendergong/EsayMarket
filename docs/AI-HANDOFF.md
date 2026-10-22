@@ -116,6 +116,7 @@ D:\projects\mall\
 │   ├── after-sale-verify.ps1     售后 + 退款（57 项断言：状态机/渠道退款/重试幂等/失败路径/状态收敛/越权）
 │   ├── payment-verify.ps1        支付链路（39 项断言：支付单/渠道/幂等/回调验签/查单兜底/越权）
 │   ├── reconcile-verify.ps1      对账（35 项断言：支付+退款差异归类 / 差异处理审计 / 越权）
+│   ├── https-verify.sh           HTTPS（18 项断言：证书链 / 301 / TLS 策略 / 安全头 / 真实业务）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -794,7 +795,12 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
      补记与重退必须走「同步支付」「查询退款」并人工确认。把不可逆的资金动作放进一个 UI 按钮，
      迟早点错一次。
 101. **审计字段别直接记 `Authentication.getName()`**：本项目的 JWT principal 是用户 id，
-     记下来就是 `by=4`，事后查不到是谁。用 id 反查用户名再落库。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+     记下来就是 `by=4`，事后查不到是谁。用 id 反查用户名再落库。102. **自签证书必须写 SAN**：只写 `CN=domain` 时 curl/现代浏览器一律报 hostname mismatch
+     （CN 早就不是主机名校验依据了）。用 `-addext "subjectAltName=DNS:...,IP:..."`。
+103. **WSL 里跑的 nginx 要反代 Windows 上的服务，必须用网关 IP**（`ip route` 默认路由那条），
+     `127.0.0.1` 在 WSL 内指 WSL 自己，会得到 connection refused。
+104. **HSTS 的 `includeSubDomains` 会锁死子域**：某个子域还是 http 时浏览器直接拒绝访问。
+     首次上线先 `max-age=300` 观察，确认无 http 子域后再放到一年。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -956,7 +962,60 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
 
-### 对账：账单逐笔比对（`reconcile-verify.ps1` 23/23）
+### HTTPS 落地（`https-verify.sh` 18/18）
+
+之前 `deploy/nginx-tls.conf.example` 只是**一份没人跑过的模板**，这是上线前的硬阻塞之一。
+
+#### 怎么做到"可验证"
+
+开发机没有 nginx、也没有证书。做法是：在 WSL 里装一个 nginx，用 **openssl 自签一套 CA + 服务器证书**，
+把配置真的跑起来，然后用 curl/openssl 逐项断言。所以这份模板不是"看起来对"，而是"跑通过"。
+
+```
+== 0) 证书
+[PASS] 0.2 证书链校验通过（自签 CA 签发）
+[PASS] 0.3 SAN 覆盖 localhost / 127.0.0.1
+== 1) nginx
+[PASS] 1.1 nginx -t 语法检查通过
+== 2) 跳转
+[PASS] 2.1 HTTP 返回 301 / 2.2 跳转目标是 https
+== 3) 握手
+[PASS] 3.1 信任 CA 时握手成功（200）
+[PASS] 3.2 不信任该 CA 时校验失败（说明证书确实是我们签的）
+[PASS] 3.3 TLS 1.1 被拒绝
+[PASS] 3.4 TLS 1.3 可用且链校验通过
+== 4) 安全头
+[PASS] 4.1 HSTS（max-age=31536000; includeSubDomains）
+[PASS] 4.2 X-Content-Type-Options: nosniff
+[PASS] 4.3 X-Frame-Options: DENY
+[PASS] 4.4 Referrer-Policy
+[PASS] 4.5 不暴露 nginx 版本
+== 5) 业务
+[PASS] 5.1 HTTPS -> nginx -> 后端：管理员登录成功
+[PASS] 5.2 带 token 的业务接口经 HTTPS 可用（200）
+```
+
+#### 三个容易踩的点
+
+1. **自签证书必须写 SAN**：只写 `CN=mall.local`，curl 和现代浏览器都不认（hostname mismatch）。
+   脚本用 `-addext "subjectAltName=DNS:localhost,DNS:mall.local,IP:127.0.0.1"` + `ext.cnf` 显式声明。
+2. **WSL 里的 nginx 要访问 Windows 后端，必须走网关 IP**（`ip route` 默认路由，实测 192.168.176.1）；
+   `127.0.0.1` 在 WSL 里指 WSL 自己。
+3. **HSTS 的 `includeSubDomains` 有锁死风险**：某个子域还是 http 就会被浏览器直接拒绝。
+   首次上线先把 `max-age` 调到 300 秒观察一天，再放大到一年。
+
+#### 上线前必须做、但开发机做不了的
+
+| 项 | 原因 |
+|---|---|
+| 真实 CA 证书 + 域名 | 没有签发权限 |
+| 证书自动续期（certbot + deploy-hook） | 需要真实 ACME 流程 |
+| OCSP stapling | 需要真实证书链 |
+| `mall.security.cookie.secure=true` 的实际下发 | 依赖 prod profile，已由 `ProductionConfigGuard` 强制 |
+
+模板见 `deploy/nginx-tls.conf.example`，文末列了这四条 TODO。
+
+### 对账：账单逐笔比对（`reconcile-verify.ps1` 35/35）
 
 前两轮做的「回调 + 主动查单」都是**单笔**兜底，而且都依赖"我们知道要查哪一笔"。
 真正的兜底是**对账**：拿渠道账单和本地记录逐笔比。它回答的是另一个问题 ——
@@ -1654,6 +1713,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 退款打到渠道 | ✅ | 见下方「退款真正打到渠道」；`after-sale-verify.ps1` **52/52**（含失败路径） |
 | 退款状态收敛（通知 + 查单） | ✅ | 见下方「退款状态收敛」；`after-sale-verify.ps1` **57/57** |
 | 支付查单兜底（回调丢失） | ✅ | 见下方「支付查单兜底」；`payment-verify.ps1` **39/39** |
+| HTTPS 落地（TLS 终止 + 安全头） | ✅ | 见下方「HTTPS 落地」；`https-verify.sh` **18/18** |
 | 对账（支付 + 退款逐笔比对 + 差异处理） | ✅ | 见下方「对账」；`reconcile-verify.ps1` **35/35** |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 

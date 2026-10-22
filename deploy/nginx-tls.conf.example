@@ -1,99 +1,155 @@
 # ============================================================================
-# HTTPS 终止配置模板（**示例，需按实际域名/证书路径调整后再启用**）
+# 生产 nginx（TLS 终止 + 同源反代）—— 这份配置与 scripts/https-verify.sh 验证过的结构一致
 #
-# 为什么必须有这一层：目前两个前端容器只监听 80，登录密码、JWT、
-# 手机号/收货地址**全部以明文经过网络**。数据库里字段加密做得再好，
-# 也挡不住链路上被截获 —— 传输加密是这一块的前提，不是可选项。
+# 验证过的部分（18/18，见 docs §7「HTTPS」）：
+#   - 自签 CA 签发 + 证书链校验 + SAN 覆盖主机名
+#   - HTTP -> HTTPS 301
+#   - 只允许 TLSv1.2/1.3（TLS 1.1 被拒），TLS 1.3 可用
+#   - HSTS / nosniff / DENY / Referrer-Policy 四个响应头
+#   - server_tokens off（不暴露版本）
+#   - HTTPS -> nginx -> 后端 的真实业务调用（登录 + 带 token 的接口）
 #
-# ⚠️ 这份模板在本机**没有真实验证过**（本机没有 nginx、也没有证书），
-#    上线前请在目标机器上：
-#      1) 换成真实证书（推荐 certbot / 云厂商证书）
-#      2) nginx -t 语法检查通过
-#      3) 用 curl -I https://<域名> 确认 HSTS 生效
-#      4) 用 https://www.ssllabs.com/ssltest/ 扫一遍（目标 A 及以上）
+# 没验证的：真实 CA 证书、真实域名、OCSP stapling、证书自动续期（见文末 TODO）。
 #
-# 用法：把本文件内容并入你的 nginx 主配置（http{} 块内），两个域名各一份，
-#       或只保留一个 server 块并把 server_name 换成你的域名。
+# 用法：
+#   1) 证书放到 /etc/nginx/certs/{fullchain.pem,privkey.pem}
+#   2) 替换下面所有 <...> 占位符
+#   3) nginx -t && nginx -s reload
 # ============================================================================
 
-# ---------- 80 端口只做跳转，不承载任何明文业务 ----------
-server {
-    listen 80;
-    server_name mall.example.com admin.example.com;
+worker_processes auto;
+error_log  /var/log/nginx/error.log warn;
+pid        /var/run/nginx.pid;
 
-    # 保留 ACME 验证路径，否则 certbot 续期会失败
-    location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-    }
-
-    location / {
-        return 301 https://$host$request_uri;
-    }
+events {
+    worker_connections 4096;
 }
 
-# ---------- H5 商城 ----------
-server {
-    listen 443 ssl;
-    http2 on;
-    server_name mall.example.com;
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
 
-    ssl_certificate     /etc/nginx/certs/mall.example.com.fullchain.pem;
-    ssl_certificate_key /etc/nginx/certs/mall.example.com.key;
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" rt=$request_time';
+    access_log /var/log/nginx/access.log main;
 
-    # 只留 TLS 1.2/1.3（1.0/1.1 已被各大浏览器弃用，且存在已知攻击面）
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 1d;
+    sendfile        on;
+    tcp_nopush      on;
+    keepalive_timeout 65;
+    server_tokens   off;
 
-    # HSTS：强制浏览器后续只用 HTTPS。
-    # ⚠️ 先在测试域名上小流量验证，再上 includeSubDomains 与 preload；
-    #    一旦被浏览器记住，回退成 HTTP 会让用户在有效期内完全访问不了。
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-
-    # 其余安全头
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header Referrer-Policy "same-origin" always;
-    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
-
-    # CSP：本项目 token 存在 localStorage，所以重点是把 XSS 的入口收窄。
-    #   script-src 'self'        只允许自己的脚本（Vant/Element Plus 的样式是内联的，故 style 放开）
-    #   connect-src 'self'       只允许同源接口
-    #   frame-ancestors 'none'   配合 X-Frame-Options 防点击劫持
-    # ⚠️ 首次启用建议先加 `Content-Security-Policy-Report-Only` 观察一周报告，确认无误再改成强制。
-    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
-
-    root /usr/share/nginx/html;
-    index index.html;
+    # 上传账单等大文件时别太小
+    client_max_body_size 8m;
 
     gzip on;
-    gzip_types text/css application/javascript application/json image/svg+xml;
-    gzip_min_length 1024;
+    gzip_types text/plain text/css application/json application/javascript application/xml image/svg+xml;
 
-    location / {
-        try_files $uri $uri/ /index.html;
+    # ---------------------------------------------------------------- 强制 HTTPS
+    server {
+        listen 80;
+        server_name <your-domain>;
+
+        # ACME http-01 挑战放行（用 Let's Encrypt 时保留）
+        location /.well-known/acme-challenge/ {
+            root /var/www/certbot;
+        }
+
+        location / {
+            return 301 https://$host$request_uri;
+        }
     }
 
-    location /api/ {
-        proxy_pass http://mall-portal:8090;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;   # 让后端知道原始请求是 https
-    }
+    # ---------------------------------------------------------------- 主站
+    server {
+        listen 443 ssl;
+        http2 on;
+        server_name <your-domain>;
 
-    location /img/ {
-        proxy_pass http://mall-portal:8090;
-        proxy_set_header Host $host;
+        ssl_certificate     /etc/nginx/certs/fullchain.pem;
+        ssl_certificate_key /etc/nginx/certs/privkey.pem;
+
+        ssl_protocols       TLSv1.2 TLSv1.3;
+        ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+        ssl_prefer_server_ciphers off;
+        ssl_session_cache   shared:SSL:10m;
+        ssl_session_timeout 10m;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Referrer-Policy "no-referrer" always;
+
+        # ------------------------------------------------------------ 前端（同源）
+        location / {
+            root  /usr/share/nginx/html/portal;
+            index index.html;
+            try_files $uri $uri/ /index.html;
+        }
+
+        location /admin/ {
+            alias /usr/share/nginx/html/admin/;
+            index index.html;
+            try_files $uri $uri/ /admin/index.html;
+        }
+
+        # ------------------------------------------------------------ API 反代
+        #
+        # 关键：清掉 Origin。同源部署下浏览器对 **POST 也会带 Origin**，
+        # nginx 原样转发会被后端 CorsFilter 判成跨域（历史事故：登录 403，见 docs §8 第 39 条）。
+        location /api/v1/portal/ {
+            proxy_pass http://mall-portal:8090;
+            proxy_http_version 1.1;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Origin            "";
+            proxy_read_timeout 30s;
+        }
+
+        location /api/v1/admin/ {
+            proxy_pass http://mall-admin:8081;
+            proxy_http_version 1.1;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Origin            "";
+            proxy_read_timeout 30s;
+        }
+
+        # 支付/退款回调：渠道服务器直接打 https，不要加鉴权、不要缓存
+        location /api/v1/portal/pay/ {
+            proxy_pass http://mall-portal:8090;
+            proxy_http_version 1.1;
+            proxy_set_header Host              $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Origin            "";
+            proxy_buffering off;
+        }
+
+        # ------------------------------------------------------------ 运维
+        location = /actuator/health {
+            proxy_pass http://mall-portal:8090/actuator/health;
+            access_log off;
+            # 注意：生产上 health 不建议对公网开放，这里保留是为了容器 healthcheck。
+            # 如需外网摘掉，改成 allow 10.0.0.0/8; deny all;
+        }
     }
 }
 
-# ---------- 管理后台（把某一种服务再复制一份，改 server_name / root / 上游端口即可）----------
-# server {
-#     listen 443 ssl;
-#     http2 on;
-#     server_name admin.example.com;
-#     ... 同上，proxy_pass 指向 mall-admin:8081
-# }
+# ============================================================================
+# 上线前 TODO（这些没法在开发机验证，必须在上线环境做）
+#
+# 1. 证书：用真实 CA（Let's Encrypt / 企业 CA）。签发后先跑
+#      openssl s_client -connect <domain>:443 -servername <domain>
+#    确认链完整（不要拖根证书进 bundle）。
+# 2. HSTS 的 includeSubDomains：确认所有子域都已 HTTPS，否则会把自己锁死。
+#    首次上线建议先把 max-age 调到 300 秒观察一天。
+# 3. 证书续期：certbot renew --deploy-hook "nginx -s reload"，并加监控
+#    （证书过期是典型的"半夜挂掉"）。
+# 4. OCSP stapling：需要 ssl_trusted_certificate 指向链证书，未验证，配好后用
+#      openssl s_client -status 检查是否返回 "OCSP Response Status: successful"。
+# 5. 后端 prod profile 下 mall.security.cookie.secure 必须为 true（否则 Cookie 明文走 HTTP）。
+# ============================================================================
