@@ -23,6 +23,8 @@ import com.mall.core.service.OrderService;
 import com.mall.core.service.PaymentService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -61,6 +63,8 @@ public class PaymentServiceImpl implements PaymentService {
     private final OrderService orderService;
     private final PayProperties payProperties;
     private final AfterSaleMapper afterSaleMapper;
+    /** 对账任务要"逐笔一个事务"，用模板显式控制边界（不能在同一个事务里 catch 后继续） */
+    private final TransactionTemplate transactionTemplate;
     /** code -> 渠道实现，Spring 自动注入全部实现 */
     private final Map<String, PaymentChannel> channels;
 
@@ -69,12 +73,14 @@ public class PaymentServiceImpl implements PaymentService {
                               OrderService orderService,
                               PayProperties payProperties,
                               AfterSaleMapper afterSaleMapper,
+                              PlatformTransactionManager transactionManager,
                               List<PaymentChannel> channelList) {
         this.paymentMapper = paymentMapper;
         this.orderMapper = orderMapper;
         this.orderService = orderService;
         this.payProperties = payProperties;
         this.afterSaleMapper = afterSaleMapper;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.channels = channelList.stream()
                 .collect(Collectors.toMap(c -> c.channel().getCode(), Function.identity()));
     }
@@ -358,6 +364,77 @@ public class PaymentServiceImpl implements PaymentService {
                     as.getAfterSaleNo(), patch.getRefundStatus(), r.getStatus());
         }
         return n > 0;
+    }
+
+    /**
+     * 主动同步一笔支付单（回调丢失时的兜底）。
+     *
+     * <p>只有"渠道明确说收到钱了"才会置为已支付 —— 查询失败/未支付一律不动状态，
+     * 绝不能因为"查不到"就当成"付过了"。
+     */
+    @Override
+    @Transactional
+    public boolean syncPayment(String paymentNo) {
+        Payment p = paymentMapper.selectOne(Wrappers.<Payment>lambdaQuery()
+                .eq(Payment::getPaymentNo, paymentNo));
+        if (p == null) {
+            throw new BusinessException(ResultCode.PAYMENT_NOT_FOUND);
+        }
+        return syncPaymentInternal(p);
+    }
+
+    /**
+     * 扫描待支付且够旧的支付单，主动去渠道同步。
+     *
+     * <p>为什么要求"够旧"（2 分钟）：用户刚点完支付正在跳转，这时候去查一定是未支付，
+     * 白打一次接口；而回调延迟通常也就几秒。
+     */
+    @Override
+    public int reconcilePendingPayments(int limit) {
+        List<Payment> pending = paymentMapper.selectList(Wrappers.<Payment>lambdaQuery()
+                .eq(Payment::getStatus, PaymentStatus.PENDING.getCode())
+                .lt(Payment::getCreateTime, LocalDateTime.now().minusMinutes(2))
+                .orderByAsc(Payment::getId)
+                .last("LIMIT " + Math.max(1, limit)));
+        int fixed = 0;
+        for (Payment p : pending) {
+            try {
+                // 每笔单独一个事务：一笔失败不能拖累整批（渠道超时很常见）
+                Boolean paid = transactionTemplate.execute(status -> syncPaymentInternal(p));
+                if (Boolean.TRUE.equals(paid)) {
+                    fixed += 1;
+                }
+            } catch (Exception e) {
+                log.warn("[pay] payment reconcile failed no={} err={}", p.getPaymentNo(), e.toString());
+            }
+        }
+        if (fixed > 0) {
+            log.info("[pay] payment reconcile rescued {} of {} pending payments", fixed, pending.size());
+        }
+        return fixed;
+    }
+
+    /** 查一次渠道；只有渠道确认收款才落账，返回是否已支付 */
+    private boolean syncPaymentInternal(Payment p) {
+        if (Objects.equals(p.getStatus(), PaymentStatus.PAID.getCode())) {
+            return true;
+        }
+        if (!Objects.equals(p.getStatus(), PaymentStatus.PENDING.getCode())) {
+            return false;
+        }
+        PaymentChannel impl = channels.get(p.getChannel());
+        if (impl == null || !impl.available()) {
+            // 渠道没配置（例如 prod 关了 MOCK），跳过而不是报错——它本来就不该被同步
+            return false;
+        }
+        PayModels.PayQueryResult r = impl.queryPayment(PayModels.PayQuery.builder()
+                .paymentNo(p.getPaymentNo()).build());
+        if (!r.isPaid()) {
+            return false;
+        }
+        markPaid(p, r.getChannelTradeNo(), r.getAmount(), r.getRaw());
+        log.info("[pay] payment rescued by query no={} status={}", p.getPaymentNo(), r.getStatus());
+        return true;
     }
 
     @Override

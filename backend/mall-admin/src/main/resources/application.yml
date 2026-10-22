@@ -96,6 +96,10 @@ mall:
     refund-reconcile:
       enabled: ${MALL_PAY_REFUND_RECONCILE_ENABLED:false}
       interval-millis: ${MALL_PAY_REFUND_RECONCILE_INTERVAL_MILLIS:300000}
+    # 支付对账兜底：把「钱付了但回调丢了」的订单捞回来（同样只在一个应用开）
+    payment-reconcile:
+      enabled: ${MALL_PAY_PAYMENT_RECONCILE_ENABLED:false}
+      interval-millis: ${MALL_PAY_PAYMENT_RECONCILE_INTERVAL_MILLIS:120000}
 
 # 日志只打 stdout，格式在 backend/mall-core/src/main/resources/logback-spring.xml 里；
 # 目录/轮转交给运行环境（docker 的 json-file 上限见 docker-compose.yml，裸机交给 logrotate）。

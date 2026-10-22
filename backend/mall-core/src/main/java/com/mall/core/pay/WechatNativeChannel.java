@@ -47,6 +47,8 @@ public class WechatNativeChannel implements PaymentChannel {
     private static final String PATH = "/v3/pay/transactions/native";
     /** 退款接口（申请退款） */
     private static final String PATH_REFUND = "/v3/refund/domestic/refunds";
+    /** 支付查询前缀（后面拼 out_trade_no + ?mchid=） */
+    private static final String PATH_QUERY = "/v3/pay/transactions/out-trade-no/";
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(8))
             .build();
@@ -201,6 +203,62 @@ public class WechatNativeChannel implements PaymentChannel {
             log.warn("[pay] wechat refund call error: {}", e.toString());
             throw new BusinessException(ResultCode.REFUND_FAILED, "微信退款请求失败");
         }
+    }
+
+    /**
+     * 主动查支付单（{@code GET /v3/pay/transactions/out-trade-no/{out_trade_no}?mchid=...}）。
+     *
+     * <p>注意待签名串里的 URL **要带 query**（`?mchid=`），漏掉就会一直 401 签名错误。
+     */
+    @Override
+    public PayModels.PayQueryResult queryPayment(PayModels.PayQuery query) {
+        PayProperties.Wechat cfg = properties.getWechat();
+        if (!available()) {
+            throw new BusinessException(ResultCode.PAY_CHANNEL_UNAVAILABLE, "微信支付渠道未配置");
+        }
+        String path = PATH_QUERY + query.getPaymentNo() + "?mchid=" + cfg.getMchId();
+        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String nonce = randomNonce();
+        String authorization = buildAuthorization(cfg, "GET", path, "", timestamp, nonce);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(cfg.getApiBase() + path))
+                .timeout(Duration.ofSeconds(15))
+                .header("Authorization", authorization)
+                .header("Accept", "application/json")
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> resp = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (resp.statusCode() == 404) {
+                // 用户还没扫码，微信侧没有这笔单 —— 正常情况，不是错误
+                return PayModels.PayQueryResult.builder()
+                        .paymentNo(query.getPaymentNo()).paid(false).status("NOTPAY").raw(resp.body()).build();
+            }
+            if (resp.statusCode() != 200) {
+                throw new BusinessException(ResultCode.REFUND_FAILED, "微信支付查询失败：" + resp.statusCode());
+            }
+            var node = JSON.readTree(resp.body());
+            String tradeState = node.path("trade_state").asText("");
+            JsonNode total = node.path("amount").path("total");
+            return PayModels.PayQueryResult.builder()
+                    .paymentNo(query.getPaymentNo())
+                    .paid("SUCCESS".equals(tradeState))
+                    .status(tradeState)
+                    .channelTradeNo(node.path("transaction_id").asText(null))
+                    .amount(total.isMissingNode() ? null : toYuan(total.asLong()))
+                    .raw(resp.body())
+                    .build();
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[pay] wechat trade query error: {}", e.toString());
+            throw new BusinessException(ResultCode.REFUND_FAILED, "微信支付查询请求失败");
+        }
+    }
+
+    private static BigDecimal toYuan(long fen) {
+        return BigDecimal.valueOf(fen).divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP);
     }
 
     /**

@@ -44,6 +44,16 @@ public interface PaymentChannel {
     PayModels.RefundResult refund(PayModels.RefundCommand command);
 
     /**
+     * 主动查支付单状态（回调丢失时的兜底）。
+     *
+     * <p>回调会丢：用户明明付了钱，我们没收到通知，订单就一直挂到超时关单。
+     * 有了它，定时任务能把这类单救回来。
+     */
+    default PayModels.PayQueryResult queryPayment(PayModels.PayQuery query) {
+        throw new BusinessException(ResultCode.PAY_QUERY_NOT_SUPPORTED, "该渠道不支持支付查询");
+    }
+
+    /**
      * 主动查退款单状态（对账兜底）。
      *
      * <p>为什么要它：退款通知可能丢（网络抖动、回调地址配错、服务重启），

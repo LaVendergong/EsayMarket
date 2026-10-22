@@ -68,6 +68,22 @@ public class MockPaymentChannel implements PaymentChannel {
                 .build();
     }
 
+    /**
+     * 模拟渠道**没有"渠道侧真相"**：我们的库就是唯一事实来源。
+     *
+     * <p>所以这里永远返回"未支付"。如果模拟渠道也说"付过了"，对账任务就会把
+     * 任何一个待支付订单直接改成已支付 —— 那不是兜底，那是白送。
+     */
+    @Override
+    public PayModels.PayQueryResult queryPayment(PayModels.PayQuery query) {
+        return PayModels.PayQueryResult.builder()
+                .paymentNo(query.getPaymentNo())
+                .paid(false)
+                .status("NOTPAY")
+                .raw("{\"mock\":true}")
+                .build();
+    }
+
     /** 模拟渠道的退款查询：直接回 SUCCESS，用来验证「退款中 -> 退款成功」的收敛链路 */
     @Override
     public PayModels.RefundNotifyResult queryRefund(PayModels.RefundQuery query) {

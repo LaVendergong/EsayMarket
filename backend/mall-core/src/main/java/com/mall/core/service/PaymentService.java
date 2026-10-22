@@ -44,4 +44,14 @@ public interface PaymentService {
 
     /** 扫描「退款中」的售后单主动查询收敛（定时任务用），返回处理条数 */
     int reconcileProcessingRefunds(int limit);
+
+    /**
+     * 主动同步一笔支付单的真实状态（回调丢失时的兜底）。
+     *
+     * @return true 表示这笔支付已确认成功（本次同步或之前就已成功）
+     */
+    boolean syncPayment(String paymentNo);
+
+    /** 扫描「待支付且够旧」的支付单主动同步（定时任务用），返回被救回的笔数 */
+    int reconcilePendingPayments(int limit);
 }

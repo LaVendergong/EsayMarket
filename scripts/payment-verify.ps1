@@ -174,6 +174,21 @@ $d3 = Http-Json -Method POST -Url "$portal/api/v1/portal/payment/$payA/mock-pay"
 Check 'D3 a closed payment cannot be paid (4003)' ((Code $d3) -eq 4003) "code=$(Code $d3)"
 Check 'D4 order is still unpaid after paying a closed payment' ((Sql "SELECT status FROM t_order WHERE id = $order2;") -eq '0') "status=$(Sql "SELECT status FROM t_order WHERE id = $order2;")"
 
+# ============================================================ J) 支付查单兜底
+Write-Host ''
+Write-Host '== J) payment query fallback (callback lost) =='
+# MOCK 渠道没有"渠道侧真相"，所以查询一定是未支付：这正好用来证明对账任务**不会凭空把订单置为已支付**
+$sync = Http-Json -Method POST -Url "$admin/api/v1/admin/payment/$payB/sync" -Token $adminToken -Name '90-sync-payment'
+Check 'J1 sync endpoint reports not paid for MOCK (no false positive)' ((Code $sync) -eq 200 -and (Payload $sync).paid -eq $false) "code=$(Code $sync) paid=$(Payload $sync).paid"
+Check 'J2 order stays unpaid when the channel says NOTPAY' ((Sql "SELECT status FROM t_order WHERE id = $order2;") -eq '0') "orderStatus=$(Sql "SELECT status FROM t_order WHERE id = $order2;")"
+Check 'J3 payment stays PENDING' ((Sql "SELECT status FROM t_payment WHERE payment_no = '$payB';") -eq '0') "payStatus=$(Sql "SELECT status FROM t_payment WHERE payment_no = '$payB';")"
+
+$syncMissing = Http-Json -Method POST -Url "$admin/api/v1/admin/payment/P-NOT-EXIST/sync" -Token $adminToken -Name '91-sync-missing'
+Check 'J4 syncing an unknown payment returns 4002' ((Code $syncMissing) -eq 4002) "code=$(Code $syncMissing)"
+
+$syncByUser = Http-Json -Method POST -Url "$admin/api/v1/admin/payment/$payB/sync" -Token $token -Name '92-sync-by-user'
+Check 'J5 normal user cannot call the admin sync endpoint (403)' ($syncByUser.http -eq 403) "http=$($syncByUser.http)"
+
 # ============================================================ E) 回调
 Write-Host ''
 Write-Host '== E) channel notify =='

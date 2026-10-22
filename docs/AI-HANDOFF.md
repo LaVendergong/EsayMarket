@@ -774,7 +774,13 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 89. **对账任务的「执行间隔」和「判定陈旧的时间」要分开**：间隔 5 分钟、但只查 5 分钟没动过的单。
     合成一个值会导致刚发起就查，把渠道正常处理中的单误判成异常。
 90. **`@Scheduled` 方法必须自己 try/catch**：异常抛出去会被调度器吞掉并可能停止后续调度，
-    表现为"任务只跑了一次就再也不动了"，而且日志里几乎没有痕迹。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+    表现为"任务只跑了一次就再也不动了"，而且日志里几乎没有痕迹。91. **对账兜底只能"渠道确认成功才落账"**，绝不能"查不到/查询失败就当已支付"。
+    误判的影响面比不做兜底大得多。同理：`MOCK` 渠道的 `queryPayment` 必须返回 NOTPAY ——
+    它返回"已支付"就等于让对账任务把待支付订单批量标成已付，纯白送。
+92. **批量任务里"逐笔事务"要用 `TransactionTemplate` 显式开**：在一个大事务里 try/catch 没用，
+    异常吞掉后事务已被标记 rollback-only，最后整批回滚。
+93. **微信 v3 的 GET 查询签名，URL 必须带 query**（`/v3/pay/transactions/out-trade-no/{no}?mchid=xxx`），
+    只签 path 会一直 401 签名错误。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -935,6 +941,46 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 支付查单兜底：回调丢了也能救回来（`payment-verify.ps1` 39/39）
+
+**问题**：支付成功靠渠道异步回调。回调会丢（网络、回调地址配错、服务在重启），
+这时用户**钱已经扣了**，订单却还是「待支付」，最后被超时任务关掉 —— 钱扣了、单关了，
+是最难解释的一类事故。
+
+#### 两条兜底路径
+
+| 路径 | 触发方 | 说明 |
+|---|---|---|
+| 定时对账 | `PaymentReconcileTask`（每 2 分钟） | 捞「待支付且创建超过 2 分钟」的单，主动查渠道 |
+| 人工同步 | 后台 `POST /admin/payment/{paymentNo}/sync` | 用户打电话说"我付过钱了"，客服点一下查真实状态 |
+
+> `MOCK` 渠道的 `queryPayment` **永远返回 NOTPAY**。这不是偷懒：模拟渠道没有"渠道侧真相"，
+> 如果它也说"付过了"，对账任务就会把所有待支付订单直接改成已支付 —— 那不是兜底，是白送。
+
+#### 一条铁律
+
+**只有渠道明确说 SUCCESS 才落账**。查不到、超时、返回 NOTPAY/CLOSED 一律**不动状态**。
+写成"查询失败就当已支付"是最危险的实现方式 —— 兜底逻辑一旦误判，影响面比没有兜底大得多。
+
+#### 逐笔事务
+
+一批里单笔失败不能拖累整批（渠道超时很常见）。但把 `try/catch` 放在一个大事务里没用：
+异常被吞掉后事务已经被标记 rollback-only，最后还是整批失败。所以用 `TransactionTemplate`
+**每笔单独开事务**。
+
+#### 验证（39/39，节选）
+
+```
+[PASS] J1 sync endpoint reports not paid for MOCK (no false positive)
+[PASS] J2 order stays unpaid when the channel says NOTPAY :: orderStatus=0
+[PASS] J3 payment stays PENDING :: payStatus=0
+[PASS] J4 syncing an unknown payment returns 4002
+[PASS] J5 normal user cannot call the admin sync endpoint (403)
+```
+
+单元测试（`PaymentServiceImplTest`，5 条）盯的是同一个不变量：
+渠道说成功才落账、说不成功什么都不改、已支付不重复落账、已关闭不被"复活"、渠道不可用直接跳过。
 
 ### 退款状态收敛：通知 + 主动查单（`after-sale-verify.ps1` 57/57）
 
@@ -1509,6 +1555,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 支付（收银台 / 支付单 / 三渠道） | ✅ | 见下方「支付」；`payment-verify.ps1` **34/34** + UI 6 条 |
 | 退款打到渠道 | ✅ | 见下方「退款真正打到渠道」；`after-sale-verify.ps1` **52/52**（含失败路径） |
 | 退款状态收敛（通知 + 查单） | ✅ | 见下方「退款状态收敛」；`after-sale-verify.ps1` **57/57** |
+| 支付查单兜底（回调丢失） | ✅ | 见下方「支付查单兜底」；`payment-verify.ps1` **39/39** |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）

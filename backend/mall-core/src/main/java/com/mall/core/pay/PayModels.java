@@ -67,6 +67,28 @@ public final class PayModels {
         private String raw;
     }
 
+    /** 支付查询入参 */
+    @Data
+    @Builder
+    public static class PayQuery {
+        /** 商户支付单号 */
+        private String paymentNo;
+    }
+
+    /** 支付查询结果（对账兜底用） */
+    @Data
+    @Builder
+    public static class PayQueryResult {
+        private String paymentNo;
+        /** 渠道是否确认这笔钱收到了 */
+        private boolean paid;
+        private String channelTradeNo;
+        private BigDecimal amount;
+        /** 渠道原始状态文本：SUCCESS / NOTPAY / CLOSED ... */
+        private String status;
+        private String raw;
+    }
+
     /** 退款查询入参 */
     @Data
     @Builder
