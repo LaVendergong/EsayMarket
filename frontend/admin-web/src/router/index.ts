@@ -66,6 +66,12 @@ const router = createRouter({
           meta: { title: '商品详情' }
         },
         {
+          path: 'reconcile',
+          name: 'reconcile',
+          component: () => import('@/views/ReconcileView.vue'),
+          meta: { title: '对账' }
+        },
+        {
           path: 'after-sale',
           name: 'afterSale',
           component: () => import('@/views/AfterSaleListView.vue'),

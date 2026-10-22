@@ -114,7 +114,8 @@ D:\projects\mall\
 │   ├── metrics-verify.ps1        监控验证（16 项断言：prometheus 端点 + 业务计数器真的会动）
 │   ├── admin-crud-verify.mjs     后台分类/商品的 **UI** CRUD 验证（16 项断言）
 │   ├── after-sale-verify.ps1     售后 + 退款（57 项断言：状态机/渠道退款/重试幂等/失败路径/状态收敛/越权）
-│   ├── payment-verify.ps1        支付链路（34 项断言：支付单/渠道/幂等/回调验签/越权）
+│   ├── payment-verify.ps1        支付链路（39 项断言：支付单/渠道/幂等/回调验签/查单兜底/越权）
+│   ├── reconcile-verify.ps1      对账（23 项断言：三类差异归类 / 空账单报错 / 越权）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -780,7 +781,12 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 92. **批量任务里"逐笔事务"要用 `TransactionTemplate` 显式开**：在一个大事务里 try/catch 没用，
     异常吞掉后事务已被标记 rollback-only，最后整批回滚。
 93. **微信 v3 的 GET 查询签名，URL 必须带 query**（`/v3/pay/transactions/out-trade-no/{no}?mchid=xxx`），
-    只签 path 会一直 401 签名错误。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+    只签 path 会一直 401 签名错误。94. **账单解析按「表头名」映射，不要写死列序号**：渠道账单经常多一列（费率备注之类），
+    按下标取会整体错位，而且错得很安静（金额取到别的列）。找不到表头就返回空 + 告警。
+95. **账单解析为空时必须报错，不能生成"零差异"报告**：一份"全对"的假报告比不核对更危险。
+96. **退款行不能参与支付对账**：否则每笔退款都会多出一条「渠道有、本地无」的假差异，把真差异淹没。
+97. **对账断言别假设"当天库里只有自己造的数据"**：测试环境有历史订单，`MISSING_CHANNEL`
+    天然会 > 1。断言用「相对数量」+「自己那笔必须在清单里」，不要写死等于几。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -941,6 +947,59 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 对账：账单逐笔比对（`reconcile-verify.ps1` 23/23）
+
+前两轮做的「回调 + 主动查单」都是**单笔**兜底，而且都依赖"我们知道要查哪一笔"。
+真正的兜底是**对账**：拿渠道账单和本地记录逐笔比。它回答的是另一个问题 ——
+**有没有哪一笔钱，渠道收了、我们根本不知道。**
+
+#### 三类差异（含义完全不同，处理方式也不同）
+
+| 类型 | 含义 | 危险程度 |
+|---|---|---|
+| `MISSING_LOCAL` | 渠道账单有、本地没有 | **最高**：钱收了没记账 |
+| `MISSING_CHANNEL` | 本地有、账单里没有 | 中：可能是测试数据，或账单缺页 |
+| `AMOUNT_MISMATCH` | 两边都有、金额不同 | 低：通常是优惠/手续费口径 |
+
+#### 为什么是「上传账单」而不是「自动下载」
+
+真实账单接口需要商户资质（支付宝需要应用证书、微信需要 API 证书），而且**账单格式必须拿真实文件核对**。
+所以这一版把控住风险最高的部分 —— **解析与比对逻辑**，账单来源先做成上传。
+解析器按**表头名**映射列（不是写死列号），账单多一列也不会整体错位。
+
+| 解析器 | 格式 |
+|---|---|
+| `NormalizedBillParser` | 归一化 CSV（表头英文），模拟渠道与手工整理用 |
+| `AlipayBillParser` | 支付宝业务明细：跳过前几行说明、按表头取「商户订单号/支付宝交易号/订单金额」，有退款批次号的行判为退款 |
+| `WechatBillParser` | 微信交易账单：去反引号、按表头取列、交易状态列 |
+
+> 两个真实解析器的**列映射是按公开文档写的默认值，上线前必须拿一份真实账单核对**。
+> 归一化格式是确定可用的，本地与自动化都用它。
+
+#### 两个刻意的行为
+
+1. **账单解析不出任何流水时直接报错（400）**，而不是生成一份"零差异"报告 ——
+   静默的"全对"比不核对更危险
+2. **退款行不参与支付对账**（v1），否则每笔退款都会凭空多出一条"渠道有本地无"
+
+#### 验证（23/23，节选）
+
+```
+[PASS] A2 totalLines = 3
+[PASS] A3 matched = 1
+[PASS] A4 missingLocal = 1 (channel has it, we do not)
+[PASS] A5 amountMismatch = 1
+[PASS] A6 missingChannel >= 1 (local payments absent from the bill)
+[PASS] B2b the ghost order is classified as missing-local, not missing-channel
+[PASS] B4 amount mismatch carries both amounts (60 vs 55)
+[PASS] C2 unparsable bill fails loudly (400), not a fake clean report
+```
+
+> 第一次跑是 20/22：我断言"`missingChannel=1`"，实际是 19 —— 因为当天库里还有别的测试订单，
+> 它们确实"本地有、账单无"。**引擎是对的，断言错了**。改成相对断言后才对。
+
+界面上：后台新增「对账」菜单 —— 选渠道/日期、上传或粘贴账单、看汇总与逐笔差异清单、历史批次。
 
 ### 支付查单兜底：回调丢了也能救回来（`payment-verify.ps1` 39/39）
 
@@ -1556,6 +1615,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 退款打到渠道 | ✅ | 见下方「退款真正打到渠道」；`after-sale-verify.ps1` **52/52**（含失败路径） |
 | 退款状态收敛（通知 + 查单） | ✅ | 见下方「退款状态收敛」；`after-sale-verify.ps1` **57/57** |
 | 支付查单兜底（回调丢失） | ✅ | 见下方「支付查单兜底」；`payment-verify.ps1` **39/39** |
+| 对账（账单逐笔比对） | ✅ | 见下方「对账」；`reconcile-verify.ps1` **23/23** |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）

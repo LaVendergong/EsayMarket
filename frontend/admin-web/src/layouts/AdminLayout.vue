@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Files, Goods, Service, Tickets } from '@element-plus/icons-vue'
+import { Files, Goods, Money, Service, Tickets } from '@element-plus/icons-vue'
 import { authApi } from '@/api'
 import { auth } from '@/stores/auth'
 import AppErrorBoundary from '@/components/AppErrorBoundary.vue'
@@ -49,6 +49,10 @@ async function onCommand(cmd: string) {
         <el-menu-item index="/category">
           <el-icon><Files /></el-icon>
           <span>分类管理</span>
+        </el-menu-item>
+        <el-menu-item index="/reconcile">
+          <el-icon><Money /></el-icon>
+          <span>对账</span>
         </el-menu-item>
         <el-menu-item index="/after-sale">
           <el-icon><Service /></el-icon>

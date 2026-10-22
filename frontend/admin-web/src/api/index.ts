@@ -1,5 +1,6 @@
 import { http } from './http'
-import type { AfterSaleVO, 
+import type { AfterSaleVO,
+  ReconcileBatchVO, 
   CategoryDTO,
   CategoryVO,
   LoginVO,
@@ -55,4 +56,12 @@ export const afterSaleApi = {
     http.post<never, void>(`/admin/after-sale/${id}/approve`, { remark }),
   reject: (id: number, remark?: string) =>
     http.post<never, void>(`/admin/after-sale/${id}/reject`, { remark })
+}
+/** 对账：上传账单 / 批次列表 / 详情 */
+export const reconcileApi = {
+  submit: (data: { channel: string; billDate: string; content: string }) =>
+    http.post<never, ReconcileBatchVO>('/admin/reconcile', data),
+  page: (pageNum = 1, pageSize = 10) =>
+    http.get<never, PageResult<ReconcileBatchVO>>('/admin/reconcile/page', { params: { pageNum, pageSize } }),
+  detail: (id: number) => http.get<never, ReconcileBatchVO>(`/admin/reconcile/${id}`)
 }

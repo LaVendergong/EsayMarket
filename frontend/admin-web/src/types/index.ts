@@ -163,3 +163,30 @@ export interface AfterSaleVO {
   refundError?: string
   items?: OrderItemVO[]
 }
+/** 对账批次 */
+export interface ReconcileDiffVO {
+  id: number
+  diffType: string
+  diffTypeText: string
+  paymentNo?: string
+  channelTradeNo?: string
+  localAmount?: number
+  channelAmount?: number
+  detail?: string
+}
+
+export interface ReconcileBatchVO {
+  id: number
+  channel: string
+  channelText: string
+  billDate: string
+  totalLines: number
+  matched: number
+  missingLocal: number
+  missingChannel: number
+  amountMismatch: number
+  status: number
+  statusText: string
+  createTime?: string
+  diffs?: ReconcileDiffVO[]
+}

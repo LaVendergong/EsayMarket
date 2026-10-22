@@ -153,6 +153,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/after-sale-verify.ps
 
 # 支付链路（39 项断言：支付单/渠道/幂等/回调验签/查单兜底/越权；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/payment-verify.ps1
+
+# 对账（23 项断言：三类差异归类 / 空账单报错 / 越权；会自己停/起后端）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/reconcile-verify.ps1
 ```
 
 前两个脚本会自己 stop → build → run → 跑断言 → 汇总，证据落在 `tmp/<阶段>/`。
@@ -209,7 +212,10 @@ prod 下的行为差异：
   **退款会真正打到原支付渠道**（MOCK / 支付宝 `alipay.trade.refund` / 微信 `/v3/refund/domestic/refunds`）：
   退款单号由售后单号派生（渠道侧幂等，重试不会重复退钱）；退款失败时售后保持待处理、失败原因落库，
   订单不会被标成"已退款"。售后状态与退款状态是两个字段（同意 ≠ 钱到账）。
-  **支付回调丢失有兜底**：`PaymentReconcileTask` 每 2 分钟查一次「待支付且超过 2 分钟」的单，
+  **对账**：后台「对账」菜单可上传某渠道某天的账单，与本地支付记录逐笔比对，输出三类差异
+  （渠道有本地无 / 本地有渠道无 / 金额不一致）。账单解析按**表头名**映射，归一化格式（`out_trade_no,...`）
+  可直接用；支付宝/微信账单解析器的列映射需拿真实账单核对后再上线。
+  **支付回调丢失有兜底**：  **支付回调丢失有兜底**：`PaymentReconcileTask` 每 2 分钟查一次「待支付且超过 2 分钟」的单，
   后台也可手动 `POST /admin/payment/{paymentNo}/sync`；**只有渠道确认收款才落账**。
   「退款中」会被三条路径收敛：微信退款通知（`/portal/pay/refund-notify/{channel}`）、
   每 5 分钟的 `RefundReconcileTask` 主动查单、后台售后的「查询退款」手动触发。  入口：订单详情、我的 → 我的售后；后台「售后处理」菜单。
@@ -225,7 +231,7 @@ prod 下的行为差异：
 > 这个自检是必需的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把解析不了的占位符
 > **原样保留而不是报错**，只靠 YAML 写 `${MALL_JWT_SECRET}` 拦不住（详见 `docs/AI-HANDOFF.md` §8 第 26 条）。
 
-CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V10、两个前端 typecheck+build。
+CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V11、两个前端 typecheck+build。
 
 ## 几个必须知道的坑
 
