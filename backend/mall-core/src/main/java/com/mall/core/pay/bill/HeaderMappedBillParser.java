@@ -36,6 +36,16 @@ public abstract class HeaderMappedBillParser implements BillParser {
         return new String[]{"退款金额", "退款单号", "微信退款单号"};
     }
 
+    /**
+     * 商户退款单号的表头候选。
+     *
+     * <p>退款对账靠它和本地 {@code t_after_sale.refund_no} 匹配 —— 我们发给渠道的
+     * {@code out_refund_no} 会原样出现在账单里。
+     */
+    protected String[] refundNoHeaders() {
+        return new String[]{"商户退款单号", "退款批次号/请求号", "退款单号"};
+    }
+
     @Override
     public List<BillLine> parse(String content) {
         List<BillLine> out = new ArrayList<>();
@@ -60,6 +70,7 @@ public abstract class HeaderMappedBillParser implements BillParser {
         int iAmount = indexOf(header, amountHeaders());
         int iStatus = indexOf(header, statusHeaders());
         int[] iRefund = indexesOf(header, refundHeaders());
+        int iRefundNo = indexOf(header, refundNoHeaders());
         if (iOut < 0 || iAmount < 0) {
             log.warn("[reconcile] bill header missing required column, channel={}", channel());
             return out;

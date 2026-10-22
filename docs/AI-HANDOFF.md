@@ -115,7 +115,7 @@ D:\projects\mall\
 │   ├── admin-crud-verify.mjs     后台分类/商品的 **UI** CRUD 验证（16 项断言）
 │   ├── after-sale-verify.ps1     售后 + 退款（57 项断言：状态机/渠道退款/重试幂等/失败路径/状态收敛/越权）
 │   ├── payment-verify.ps1        支付链路（39 项断言：支付单/渠道/幂等/回调验签/查单兜底/越权）
-│   ├── reconcile-verify.ps1      对账（23 项断言：三类差异归类 / 空账单报错 / 越权）
+│   ├── reconcile-verify.ps1      对账（30 项断言：支付+退款三类差异归类 / 空账单报错 / 越权）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
 │   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
@@ -786,7 +786,11 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 95. **账单解析为空时必须报错，不能生成"零差异"报告**：一份"全对"的假报告比不核对更危险。
 96. **退款行不能参与支付对账**：否则每笔退款都会多出一条「渠道有、本地无」的假差异，把真差异淹没。
 97. **对账断言别假设"当天库里只有自己造的数据"**：测试环境有历史订单，`MISSING_CHANNEL`
-    天然会 > 1。断言用「相对数量」+「自己那笔必须在清单里」，不要写死等于几。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+    天然会 > 1。断言用「相对数量」+「自己那笔必须在清单里」，不要写死等于几。98. **退款对账靠「商户退款单号」匹配**（`out_refund_no`），账单里没有这个号的行要**跳过并告警**，
+    不能算成差异 —— 否则一批无主退款行会把真差异淹没。
+99. **MySQL 8 没有 `ADD COLUMN IF NOT EXISTS`**：迁移脚本要幂等，用
+    `information_schema` 判断 + `PREPARE/EXECUTE` 动态执行（V10/V12 都是这么写的），
+    否则重跑一次迁移就报 1060 Duplicate column。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -983,7 +987,24 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
    静默的"全对"比不核对更危险
 2. **退款行不参与支付对账**（v1），否则每笔退款都会凭空多出一条"渠道有本地无"
 
-#### 验证（23/23，节选）
+#### 退款对账（V12）
+
+V11 只对了支付，账单里的退款行被跳过。但退款错了更贵：**我们标了"已退款"、渠道其实没退**（用户在等钱）。
+
+- 匹配键是**商户退款单号**（`out_refund_no`）：我们发给渠道的退款单号会原样出现在账单里
+- 账单里**没有退款单号的行跳过并告警**，不算成差异 —— 算进去只会制造噪音，把真差异淹没
+- 退款侧单独一组计数（`refundTotalLines / refundMatched / refundMissingLocal / refundMissingChannel / refundAmountMismatch`），
+  不与支付计数混在一起；差异表用 `biz_type`（PAY/REFUND）区分
+
+```
+[PASS] A7  refundTotalLines = 3
+[PASS] A9  refund missingLocal = 1 (channel refunded, we have no record)
+[PASS] A10 refund amountMismatch = 1
+[PASS] B4  refund ghost is classified as missing-local
+[PASS] B6  the omitted refund is reported as missing-channel
+```
+
+#### 验证（30/30，节选）
 
 ```
 [PASS] A2 totalLines = 3
@@ -1615,7 +1636,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 退款打到渠道 | ✅ | 见下方「退款真正打到渠道」；`after-sale-verify.ps1` **52/52**（含失败路径） |
 | 退款状态收敛（通知 + 查单） | ✅ | 见下方「退款状态收敛」；`after-sale-verify.ps1` **57/57** |
 | 支付查单兜底（回调丢失） | ✅ | 见下方「支付查单兜底」；`payment-verify.ps1` **39/39** |
-| 对账（账单逐笔比对） | ✅ | 见下方「对账」；`reconcile-verify.ps1` **23/23** |
+| 对账（支付 + 退款逐笔比对） | ✅ | 见下方「对账」；`reconcile-verify.ps1` **30/30** |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）

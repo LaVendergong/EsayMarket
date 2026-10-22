@@ -17,6 +17,12 @@ public class ReconcileDiff extends BaseEntity {
 
     private Long batchId;
 
+    /** PAY / REFUND */
+    private String bizType;
+
+    /** 商户退款单号（bizType=REFUND 时有值） */
+    private String refundNo;
+
     /** MISSING_LOCAL / MISSING_CHANNEL / AMOUNT_MISMATCH */
     private String diffType;
 

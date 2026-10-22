@@ -31,6 +31,17 @@ public class ReconcileBatch extends BaseEntity {
 
     private Integer amountMismatch;
 
+    // ---- 退款侧计数（和支付分开，避免混在一起看不懂） ----
+    private Integer refundTotalLines;
+
+    private Integer refundMatched;
+
+    private Integer refundMissingLocal;
+
+    private Integer refundMissingChannel;
+
+    private Integer refundAmountMismatch;
+
     /** 0 有差异 1 完全一致 */
     private Integer status;
 }

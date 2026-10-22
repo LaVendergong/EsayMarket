@@ -1,11 +1,14 @@
 package com.mall.core.service.impl;
 
 import com.mall.common.exception.BusinessException;
+import com.mall.core.entity.AfterSale;
 import com.mall.core.entity.Payment;
 import com.mall.core.entity.ReconcileBatch;
 import com.mall.core.entity.ReconcileDiff;
 import com.mall.core.enums.PayChannel;
 import com.mall.core.enums.PaymentStatus;
+import com.mall.core.enums.RefundStatus;
+import com.mall.core.mapper.AfterSaleMapper;
 import com.mall.core.mapper.PaymentMapper;
 import com.mall.core.mapper.ReconcileBatchMapper;
 import com.mall.core.mapper.ReconcileDiffMapper;
@@ -39,6 +42,7 @@ class ReconcileServiceImplTest {
     private ReconcileBatchMapper batchMapper;
     private ReconcileDiffMapper diffMapper;
     private PaymentMapper paymentMapper;
+    private AfterSaleMapper afterSaleMapper;
     private ReconcileServiceImpl service;
 
     @BeforeEach
@@ -46,12 +50,13 @@ class ReconcileServiceImplTest {
         batchMapper = mock(ReconcileBatchMapper.class);
         diffMapper = mock(ReconcileDiffMapper.class);
         paymentMapper = mock(PaymentMapper.class);
+        afterSaleMapper = mock(AfterSaleMapper.class);
         when(batchMapper.insert(any(ReconcileBatch.class))).thenAnswer(inv -> {
             inv.getArgument(0, ReconcileBatch.class).setId(99L);
             return 1;
         });
         when(diffMapper.insert(any(ReconcileDiff.class))).thenReturn(1);
-        service = new ReconcileServiceImpl(batchMapper, diffMapper, paymentMapper,
+        service = new ReconcileServiceImpl(batchMapper, diffMapper, paymentMapper, afterSaleMapper,
                 List.of(new NormalizedBillParser()));
     }
 
@@ -120,6 +125,57 @@ class ReconcileServiceImplTest {
         assertThat(vo.getMatched()).isEqualTo(1);
         assertThat(vo.getMissingLocal()).isZero();
         assertThat(vo.getStatus()).isEqualTo(1);
+    }
+
+    @Test
+    void reconcile_refunds_areMatchedByRefundNo() {
+        when(paymentMapper.selectList(any())).thenReturn(new ArrayList<>());
+        // 本地：RF1 已退 100；RF2 已退 50（账单里没有）
+        when(afterSaleMapper.selectList(any())).thenReturn(List.of(
+                refunded("RF1", "100.00"), refunded("RF2", "50.00")));
+        // 账单：RF1 退 100（对得上）、RF3 退 30（本地没有）
+        String bill = """
+                out_trade_no,channel_trade_no,amount,status,biz_type,refund_no
+                RF1,MOCKR1,100.00,SUCCESS,REFUND,RF1
+                RF3,MOCKR3,30.00,SUCCESS,REFUND,RF3
+                """;
+
+        ReconcileBatchVO vo = service.reconcile(PayChannel.MOCK.getCode(), LocalDate.now(), bill);
+
+        assertThat(vo.getRefundTotalLines()).isEqualTo(2);
+        assertThat(vo.getRefundMatched()).isEqualTo(1);
+        assertThat(vo.getRefundMissingLocal()).isEqualTo(1);
+        assertThat(vo.getRefundMissingChannel()).isEqualTo(1);
+        assertThat(vo.getStatus()).isZero();
+        assertThat(vo.getDiffs()).extracting("bizType").containsOnly("REFUND");
+        assertThat(vo.getDiffs()).extracting("refundNo").contains("RF3", "RF2");
+    }
+
+    @Test
+    void reconcile_refundAmountMismatchIsFlagged() {
+        when(paymentMapper.selectList(any())).thenReturn(new ArrayList<>());
+        when(afterSaleMapper.selectList(any())).thenReturn(List.of(refunded("RF1", "100.00")));
+        String bill = """
+                out_trade_no,channel_trade_no,amount,status,biz_type,refund_no
+                RF1,MOCKR1,80.00,SUCCESS,REFUND,RF1
+                """;
+
+        ReconcileBatchVO vo = service.reconcile(PayChannel.MOCK.getCode(), LocalDate.now(), bill);
+
+        assertThat(vo.getRefundAmountMismatch()).isEqualTo(1);
+        assertThat(vo.getDiffs().get(0).getLocalAmount()).isEqualByComparingTo("100.00");
+        assertThat(vo.getDiffs().get(0).getChannelAmount()).isEqualByComparingTo("80.00");
+    }
+
+    private AfterSale refunded(String refundNo, String amount) {
+        AfterSale as = new AfterSale();
+        as.setAfterSaleNo("AS-" + refundNo);
+        as.setRefundNo(refundNo);
+        as.setRefundChannel(PayChannel.MOCK.getCode());
+        as.setRefundStatus(RefundStatus.SUCCESS.getCode());
+        as.setRefundAmount(new BigDecimal(amount));
+        as.setRefundTime(LocalDateTime.now());
+        return as;
     }
 
     @Test

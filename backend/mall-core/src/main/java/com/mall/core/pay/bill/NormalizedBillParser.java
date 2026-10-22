@@ -44,6 +44,7 @@ public class NormalizedBillParser implements BillParser {
         int iAmount = -1;
         int iStatus = -1;
         int iType = -1;
+        int iRefundNo = -1;
         for (int i = 0; i < lines.length; i++) {
             List<String> header = CsvLine.split(lines[i]);
             if (header.size() >= 3 && "out_trade_no".equalsIgnoreCase(header.get(0))) {
@@ -52,9 +53,10 @@ public class NormalizedBillParser implements BillParser {
                 iAmount = header.indexOf("amount");
                 iStatus = header.indexOf("status");
                 iType = header.indexOf("biz_type");
+                iRefundNo = header.indexOf("refund_no");
                 // 从下一行开始读数据
                 for (int j = i + 1; j < lines.length; j++) {
-                    addLine(out, lines[j], iOut, iTrade, iAmount, iStatus, iType);
+                    addLine(out, lines[j], iOut, iTrade, iAmount, iStatus, iType, iRefundNo);
                 }
                 return out;
             }
@@ -64,7 +66,7 @@ public class NormalizedBillParser implements BillParser {
     }
 
     private static void addLine(List<BillLine> out, String raw, int iOut, int iTrade,
-                                int iAmount, int iStatus, int iType) {
+                                int iAmount, int iStatus, int iType, int iRefundNo) {
         if (raw == null || raw.isBlank()) {
             return;
         }
@@ -84,6 +86,7 @@ public class NormalizedBillParser implements BillParser {
                 .channelTradeNo(cell(cells, iTrade))
                 .amount(amount)
                 .status(cell(cells, iStatus).isEmpty() ? "SUCCESS" : cell(cells, iStatus))
+                .outRefundNo(cell(cells, iRefundNo).isEmpty() ? null : cell(cells, iRefundNo))
                 .bizType(cell(cells, iType).isEmpty() ? "PAY" : cell(cells, iType).toUpperCase())
                 .build());
     }

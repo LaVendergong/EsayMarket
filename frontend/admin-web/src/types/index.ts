@@ -166,6 +166,9 @@ export interface AfterSaleVO {
 /** 对账批次 */
 export interface ReconcileDiffVO {
   id: number
+  /** PAY / REFUND */
+  bizType?: string
+  refundNo?: string
   diffType: string
   diffTypeText: string
   paymentNo?: string
@@ -185,6 +188,12 @@ export interface ReconcileBatchVO {
   missingLocal: number
   missingChannel: number
   amountMismatch: number
+  /** 退款侧（和支付分开计） */
+  refundTotalLines?: number
+  refundMatched?: number
+  refundMissingLocal?: number
+  refundMissingChannel?: number
+  refundAmountMismatch?: number
   status: number
   statusText: string
   createTime?: string

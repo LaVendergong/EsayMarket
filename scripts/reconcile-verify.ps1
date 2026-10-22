@@ -1,12 +1,12 @@
 ﻿# ============================================================================
-# 对账验证（渠道账单 vs 本地支付记录）
+# 对账验证（支付 + 退款）
 #
 # 对账是资金链路的最后一道防线：单笔查单只能查"我们知道的那些"，对账能发现
-# **我们根本不知道存在的那笔钱**。这个脚本用归一化账单把四类结果都造出来：
-#   matched           两边都有、金额一致
-#   MISSING_LOCAL     渠道有、本地没有（最危险）
-#   AMOUNT_MISMATCH   两边都有但金额不同
-#   MISSING_CHANNEL   本地有、账单里没有
+# **我们根本不知道存在的那笔钱**。
+#
+# 这个脚本用归一化账单把支付与退款两侧的各类结果都造出来：
+#   支付：matched / MISSING_LOCAL / AMOUNT_MISMATCH / MISSING_CHANNEL
+#   退款：matched / MISSING_LOCAL / AMOUNT_MISMATCH / MISSING_CHANNEL
 #
 # ASCII-only on purpose (see docs/AI-HANDOFF.md section 8, item 28).
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File D:\projects\mall\scripts\reconcile-verify.ps1
@@ -47,7 +47,8 @@ function Sql([string]$q) {
 }
 
 function Purge {
-    Sql ("DELETE FROM t_payment WHERE user_id IN (SELECT id FROM t_user WHERE username = '$BUYER'); " +
+    Sql ("DELETE FROM t_after_sale WHERE user_id IN (SELECT id FROM t_user WHERE username = '$BUYER'); " +
+        "DELETE FROM t_payment WHERE user_id IN (SELECT id FROM t_user WHERE username = '$BUYER'); " +
         "DELETE FROM t_order_item WHERE order_id IN (SELECT id FROM t_order WHERE user_id IN (SELECT id FROM t_user WHERE username = '$BUYER')); " +
         "DELETE FROM t_order WHERE user_id IN (SELECT id FROM t_user WHERE username = '$BUYER'); " +
         "DELETE FROM t_cart WHERE user_id IN (SELECT id FROM t_user WHERE username = '$BUYER'); " +
@@ -99,22 +100,41 @@ function NewPaidOrder([int]$qty) {
     return $id
 }
 
-$o1 = NewPaidOrder 1   # 30.00 -> matched
-$o2 = NewPaidOrder 2   # 60.00 -> amount mismatch (bill says 55.00)
-$o3 = NewPaidOrder 3   # 90.00 -> missing channel (not in bill)
+function NewRefund([long]$orderId) {
+    $ap = Http-Json -Method POST -Url "$portal/api/v1/portal/after-sale" -Token $token -Body @{ orderId = $orderId; type = 1; reason = '对账测试' } -Name ("13-as-" + [guid]::NewGuid().ToString('N').Substring(0,6))
+    $asId = [long](Payload $ap)
+    Http-Json -Method POST -Url "$admin/api/v1/admin/after-sale/$asId/approve" -Token $adminToken -Body @{ remark = 'ok' } -Name ("14-approve-" + [guid]::NewGuid().ToString('N').Substring(0,6)) | Out-Null
+    return $asId
+}
+
+$o1 = NewPaidOrder 1   # 30.00 -> 支付 matched
+$o2 = NewPaidOrder 2   # 60.00 -> 支付金额不符（账单 55.00）
+$o3 = NewPaidOrder 3   # 90.00 -> 支付侧账单里没有
 $pay1 = Sql "SELECT payment_no FROM t_payment WHERE order_id = $o1 AND status = 1 ORDER BY id DESC LIMIT 1;"
 $pay2 = Sql "SELECT payment_no FROM t_payment WHERE order_id = $o2 AND status = 1 ORDER BY id DESC LIMIT 1;"
 $pay3 = Sql "SELECT payment_no FROM t_payment WHERE order_id = $o3 AND status = 1 ORDER BY id DESC LIMIT 1;"
 Check 'setup: three paid orders with payment records' (($pay1 -like 'P*') -and ($pay2 -like 'P*') -and ($pay3 -like 'P*')) "p1=$pay1 p2=$pay2 p3=$pay3"
 
-# ============================================================ A) 对账
+# 三笔退款：AS1 账单里金额一致、AS2 账单里金额不符、AS3 账单里没有
+$as1 = NewRefund $o1
+$as2 = NewRefund $o2
+$as3 = NewRefund $o3
+$rf1 = Sql "SELECT IFNULL(refund_no,'-') FROM t_after_sale WHERE id = $as1;"
+$rf2 = Sql "SELECT IFNULL(refund_no,'-') FROM t_after_sale WHERE id = $as2;"
+$rf3 = Sql "SELECT IFNULL(refund_no,'-') FROM t_after_sale WHERE id = $as3;"
+Check 'setup: three approved refunds with refund_no' (($rf1 -like 'RFAS*') -and ($rf2 -like 'RFAS*') -and ($rf3 -like 'RFAS*')) "rf1=$rf1 rf2=$rf2 rf3=$rf3"
+
+# ============================================================ A) 支付 + 退款 一起对
 Write-Host ''
-Write-Host '== A) reconcile bill against local payments =='
+Write-Host '== A) reconcile payments and refunds =='
 $billLines = @(
-    'out_trade_no,channel_trade_no,amount,status,biz_type',
-    "$pay1,MOCKT-$STAMP-1,30.00,SUCCESS,PAY",
-    "$pay2,MOCKT-$STAMP-2,55.00,SUCCESS,PAY",
-    "GHOST-ORDER-$STAMP,MOCKT-$STAMP-9,12.34,SUCCESS,PAY"
+    'out_trade_no,channel_trade_no,amount,status,biz_type,refund_no',
+    "$pay1,MOCKT-$STAMP-1,30.00,SUCCESS,PAY,",
+    "$pay2,MOCKT-$STAMP-2,55.00,SUCCESS,PAY,",
+    "GHOST-ORDER-$STAMP,MOCKT-$STAMP-9,12.34,SUCCESS,PAY,",
+    "$pay1,MOCKR-$STAMP-1,30.00,SUCCESS,REFUND,$rf1",
+    "$pay2,MOCKR-$STAMP-2,55.00,SUCCESS,REFUND,$rf2",
+    "$pay1,MOCKR-$STAMP-9,12.34,SUCCESS,REFUND,RF-GHOST-$STAMP"
 )
 $content = $billLines -join "`n"
 
@@ -123,14 +143,22 @@ $rec = Http-Json -Method POST -Url "$admin/api/v1/admin/reconcile" -Token $admin
 } -Name '20-reconcile'
 $rv = Payload $rec
 Check 'A1 reconcile succeeds' ((Code $rec) -eq 200 -and $rv.id) "code=$(Code $rec) batchId=$($rv.id)"
-Check 'A2 totalLines = 3' ($rv.totalLines -eq 3) "totalLines=$($rv.totalLines)"
-Check 'A3 matched = 1' ($rv.matched -eq 1) "matched=$($rv.matched)"
-Check 'A4 missingLocal = 1 (channel has it, we do not)' ($rv.missingLocal -eq 1) "missingLocal=$($rv.missingLocal)"
-Check 'A5 amountMismatch = 1' ($rv.amountMismatch -eq 1) "amountMismatch=$($rv.amountMismatch)"
-# 注意：不能断言"恰好 1 条"——当天库里还有其它测试/演示订单（本地有、账单里没有），
-# 它们被算进 MISSING_CHANNEL 是**正确行为**。这里只要求 >= 1，并在 B5 精确校验我们自己那笔。
-Check 'A6 missingChannel >= 1 (local payments absent from the bill)' ($rv.missingChannel -ge 1) "missingChannel=$($rv.missingChannel)"
-Check 'A7 batch marked as having differences (status=0)' ($rv.status -eq 0) "status=$($rv.status)"
+Check 'A2 totalLines = 6 (3 pay + 3 refund)' ($rv.totalLines -eq 6) "totalLines=$($rv.totalLines)"
+
+# 支付侧
+Check 'A3 pay matched = 1' ($rv.matched -eq 1) "matched=$($rv.matched)"
+Check 'A4 pay missingLocal = 1 (channel has it, we do not)' ($rv.missingLocal -eq 1) "missingLocal=$($rv.missingLocal)"
+Check 'A5 pay amountMismatch = 1' ($rv.amountMismatch -eq 1) "amountMismatch=$($rv.amountMismatch)"
+# 当天库里还有别的测试订单（本地有、账单无），>=1 即可，B5 再精确校验我们自己那笔
+Check 'A6 pay missingChannel >= 1' ($rv.missingChannel -ge 1) "missingChannel=$($rv.missingChannel)"
+
+# 退款侧
+Check 'A7 refundTotalLines = 3' ($rv.refundTotalLines -eq 3) "refundTotalLines=$($rv.refundTotalLines)"
+Check 'A8 refund matched = 1' ($rv.refundMatched -eq 1) "refundMatched=$($rv.refundMatched)"
+Check 'A9 refund missingLocal = 1 (channel refunded, we have no record)' ($rv.refundMissingLocal -eq 1) "refundMissingLocal=$($rv.refundMissingLocal)"
+Check 'A10 refund amountMismatch = 1' ($rv.refundAmountMismatch -eq 1) "refundAmountMismatch=$($rv.refundAmountMismatch)"
+Check 'A11 refund missingChannel >= 1 (local refund absent from bill)' ($rv.refundMissingChannel -ge 1) "refundMissingChannel=$($rv.refundMissingChannel)"
+Check 'A12 batch marked as having differences (status=0)' ($rv.status -eq 0) "status=$($rv.status)"
 
 # ============================================================ B) 差异明细
 Write-Host ''
@@ -138,19 +166,29 @@ Write-Host '== B) diff details =='
 $batchId = [long]$rv.id
 $detail = Http-Json -Method GET -Url "$admin/api/v1/admin/reconcile/$batchId" -Token $adminToken -Name '30-detail'
 $diffs = (Payload $detail).diffs
-$types = ($diffs | ForEach-Object { $_.diffType }) -join ','
-Check 'B1 detail returns 2 + missingChannel diffs' ($diffs.Count -eq (2 + $rv.missingChannel)) "count=$($diffs.Count) expected=$(2 + $rv.missingChannel)"
-Check 'B2 all three diff types present' ($types -like '*MISSING_LOCAL*' -and $types -like '*AMOUNT_MISMATCH*' -and $types -like '*MISSING_CHANNEL*') "types=$types"
-Check 'B2b the ghost order is classified as missing-local, not missing-channel' (($diffs | Where-Object { $_.paymentNo -eq "GHOST-ORDER-$STAMP" }).diffType -eq 'MISSING_LOCAL') "ghostType=$(($diffs | Where-Object { $_.paymentNo -eq "GHOST-ORDER-$STAMP" }).diffType)"
+$payDiffs = $diffs | Where-Object { $_.bizType -eq 'PAY' }
+$refundDiffs = $diffs | Where-Object { $_.bizType -eq 'REFUND' }
 
-$ghost = $diffs | Where-Object { $_.diffType -eq 'MISSING_LOCAL' }
-Check 'B3 missing-local points at the ghost order' ($ghost.paymentNo -eq "GHOST-ORDER-$STAMP") "paymentNo=$($ghost.paymentNo)"
+Check 'B1 pay diffs carry the three payment types' `
+    ((($payDiffs | ForEach-Object { $_.diffType }) -join ',').Contains('MISSING_LOCAL') -and
+     (($payDiffs | ForEach-Object { $_.diffType }) -join ',').Contains('AMOUNT_MISMATCH') -and
+     (($payDiffs | ForEach-Object { $_.diffType }) -join ',').Contains('MISSING_CHANNEL')) `
+    "payTypes=$(($payDiffs | ForEach-Object { $_.diffType }) -join ',')"
 
-$mismatch = $diffs | Where-Object { $_.diffType -eq 'AMOUNT_MISMATCH' }
-Check 'B4 amount mismatch carries both amounts (60 vs 55)' ($mismatch.localAmount -eq 60 -and $mismatch.channelAmount -eq 55) "local=$($mismatch.localAmount) channel=$($mismatch.channelAmount)"
+$ghost = $payDiffs | Where-Object { $_.diffType -eq 'MISSING_LOCAL' }
+Check 'B2 missing-local points at the ghost order' ($ghost.paymentNo -eq "GHOST-ORDER-$STAMP") "paymentNo=$($ghost.paymentNo)"
 
-$missingChannel = $diffs | Where-Object { $_.diffType -eq 'MISSING_CHANNEL' }
-Check 'B5 missing-channel points at the omission' ($missingChannel.paymentNo -eq $pay3) "paymentNo=$($missingChannel.paymentNo)"
+$mismatch = $payDiffs | Where-Object { $_.diffType -eq 'AMOUNT_MISMATCH' }
+Check 'B3 pay amount mismatch carries both amounts (60 vs 55)' ($mismatch.localAmount -eq 60 -and $mismatch.channelAmount -eq 55) "local=$($mismatch.localAmount) channel=$($mismatch.channelAmount)"
+
+$refundGhost = $refundDiffs | Where-Object { $_.refundNo -eq "RF-GHOST-$STAMP" }
+Check 'B4 refund ghost is classified as missing-local' ($refundGhost.diffType -eq 'MISSING_LOCAL') "type=$($refundGhost.diffType)"
+
+$refundMismatch = $refundDiffs | Where-Object { $_.diffType -eq 'AMOUNT_MISMATCH' }
+Check 'B5 refund mismatch carries both amounts (60 vs 55)' ($refundMismatch.localAmount -eq 60 -and $refundMismatch.channelAmount -eq 55) "local=$($refundMismatch.localAmount) channel=$($refundMismatch.channelAmount)"
+
+$refundMissing = $refundDiffs | Where-Object { $_.diffType -eq 'MISSING_CHANNEL' }
+Check 'B6 the omitted refund is reported as missing-channel' (($refundMissing.refundNo) -contains $rf3) "refundNos=$($refundMissing.refundNo -join ',')"
 
 # ============================================================ C) 边界与权限
 Write-Host ''
@@ -161,7 +199,7 @@ Check 'C1 batch list contains the new batch' ((Payload $page).total -ge 1) "tota
 $empty = Http-Json -Method POST -Url "$admin/api/v1/admin/reconcile" -Token $adminToken -Body @{
     channel = 'MOCK'; billDate = $TODAY; content = 'garbage-not-a-bill'
 } -Name '41-empty-bill'
-Check 'C2 unparsable bill fails loudly (400), not a fake clean report' ((Code $empty) -eq 400) "code=$(Code $empty) msg=$(Payload $empty)"
+Check 'C2 unparsable bill fails loudly (400), not a fake clean report' ((Code $empty) -eq 400) "code=$(Code $empty)"
 
 $badChannel = Http-Json -Method POST -Url "$admin/api/v1/admin/reconcile" -Token $adminToken -Body @{
     channel = 'PAYPAL'; billDate = $TODAY; content = $content
@@ -170,6 +208,22 @@ Check 'C3 unknown channel is rejected (400)' ((Code $badChannel) -eq 400) "code=
 
 $userCall = Http-Json -Method GET -Url "$admin/api/v1/admin/reconcile/page" -Token $token -Name '43-user'
 Check 'C4 normal user cannot read reconcile batches (403)' ($userCall.http -eq 403) "http=$($userCall.http)"
+
+# ============================================================ D) 全部一致时不出差异
+Write-Host ''
+Write-Host '== D) a fully matching bill reports no diff =='
+$cleanLines = @(
+    'out_trade_no,channel_trade_no,amount,status,biz_type,refund_no',
+    "$pay1,MOCKT-$STAMP-1,30.00,SUCCESS,PAY,",
+    "$pay1,MOCKR-$STAMP-1,30.00,SUCCESS,REFUND,$rf1"
+)
+# 注意：这个账单只覆盖一笔支付 + 一笔退款，其它本地单仍会算 missingChannel，
+# 所以这里只验"这两笔各自 matched"，不验整批 status。
+$clean = Http-Json -Method POST -Url "$admin/api/v1/admin/reconcile" -Token $adminToken -Body @{
+    channel = 'MOCK'; billDate = $TODAY; content = ($cleanLines -join "`n")
+} -Name '50-clean'
+$cv = Payload $clean
+Check 'D1 single-payment bill matches on both sides' ($cv.matched -eq 1 -and $cv.refundMatched -eq 1) "matched=$($cv.matched) refundMatched=$($cv.refundMatched)"
 
 # ============================================================ cleanup
 Write-Host ''

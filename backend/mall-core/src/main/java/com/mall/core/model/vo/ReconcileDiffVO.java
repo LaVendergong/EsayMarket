@@ -12,6 +12,11 @@ public class ReconcileDiffVO {
 
     private Long id;
 
+    /** PAY / REFUND */
+    private String bizType;
+
+    private String refundNo;
+
     private String diffType;
 
     private String diffTypeText;
@@ -29,6 +34,8 @@ public class ReconcileDiffVO {
     public static ReconcileDiffVO from(ReconcileDiff d) {
         ReconcileDiffVO vo = new ReconcileDiffVO();
         vo.setId(d.getId());
+        vo.setBizType(d.getBizType());
+        vo.setRefundNo(d.getRefundNo());
         vo.setDiffType(d.getDiffType());
         vo.setDiffTypeText(textOf(d.getDiffType()));
         vo.setPaymentNo(d.getPaymentNo());

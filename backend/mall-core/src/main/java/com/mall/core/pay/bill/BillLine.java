@@ -18,6 +18,9 @@ public class BillLine {
     /** 商户订单号（我们自己的 payment_no） */
     private String outTradeNo;
 
+    /** 商户退款单号（退款行才有）：退款对账靠它和本地售后单匹配 */
+    private String outRefundNo;
+
     /** 渠道交易号 */
     private String channelTradeNo;
 

@@ -6,11 +6,14 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.mall.common.exception.BusinessException;
 import com.mall.common.result.PageResult;
 import com.mall.common.result.ResultCode;
+import com.mall.core.entity.AfterSale;
 import com.mall.core.entity.Payment;
 import com.mall.core.entity.ReconcileBatch;
 import com.mall.core.entity.ReconcileDiff;
 import com.mall.core.enums.PayChannel;
 import com.mall.core.enums.PaymentStatus;
+import com.mall.core.enums.RefundStatus;
+import com.mall.core.mapper.AfterSaleMapper;
 import com.mall.core.mapper.PaymentMapper;
 import com.mall.core.mapper.ReconcileBatchMapper;
 import com.mall.core.mapper.ReconcileDiffMapper;
@@ -56,15 +59,19 @@ public class ReconcileServiceImpl implements ReconcileService {
     private final ReconcileBatchMapper batchMapper;
     private final ReconcileDiffMapper diffMapper;
     private final PaymentMapper paymentMapper;
+    /** 退款对账要读售后单 */
+    private final AfterSaleMapper afterSaleMapper;
     private final Map<String, BillParser> parsers;
 
     public ReconcileServiceImpl(ReconcileBatchMapper batchMapper,
                                 ReconcileDiffMapper diffMapper,
                                 PaymentMapper paymentMapper,
+                                AfterSaleMapper afterSaleMapper,
                                 List<BillParser> parserList) {
         this.batchMapper = batchMapper;
         this.diffMapper = diffMapper;
         this.paymentMapper = paymentMapper;
+        this.afterSaleMapper = afterSaleMapper;
         this.parsers = parserList.stream()
                 .collect(Collectors.toMap(p -> p.channel().getCode(), Function.identity()));
     }
@@ -87,9 +94,16 @@ public class ReconcileServiceImpl implements ReconcileService {
                     "账单没有解析出任何流水，请检查文件格式（是否为空/表头不匹配）");
         }
 
-        // 本地侧：该渠道、该账期、已支付的支付单
+        List<BillLine> payLines = lines.stream()
+                .filter(l -> !"REFUND".equalsIgnoreCase(l.getBizType())).toList();
+        List<BillLine> refundLines = lines.stream()
+                .filter(l -> "REFUND".equalsIgnoreCase(l.getBizType())).toList();
+
         LocalDateTime from = billDate.atStartOfDay();
         LocalDateTime to = billDate.plusDays(1).atStartOfDay();
+        List<ReconcileDiff> diffs = new ArrayList<>();
+
+        // ---------------------------------------------------------------- 支付侧
         Map<String, Payment> local = paymentMapper.selectList(Wrappers.<Payment>lambdaQuery()
                         .eq(Payment::getChannel, payChannel.getCode())
                         .eq(Payment::getStatus, PaymentStatus.PAID.getCode())
@@ -98,27 +112,23 @@ public class ReconcileServiceImpl implements ReconcileService {
                 .stream()
                 .collect(Collectors.toMap(Payment::getPaymentNo, Function.identity(), (a, b) -> a, LinkedHashMap::new));
 
-        List<ReconcileDiff> diffs = new ArrayList<>();
         int matched = 0;
         int missingLocal = 0;
         int amountMismatch = 0;
         Map<String, Boolean> seen = new LinkedHashMap<>();
 
-        for (BillLine line : lines) {
-            if ("REFUND".equalsIgnoreCase(line.getBizType())) {
-                continue;   // v1 只对支付
-            }
+        for (BillLine line : payLines) {
             Payment p = local.get(line.getOutTradeNo());
             if (p == null) {
                 missingLocal += 1;
-                diffs.add(diff(null, "MISSING_LOCAL", line.getOutTradeNo(), line.getChannelTradeNo(),
+                diffs.add(diff("PAY", "MISSING_LOCAL", line.getOutTradeNo(), null, line.getChannelTradeNo(),
                         null, line.getAmount(), "渠道账单有该笔收款，本地无对应已支付记录"));
                 continue;
             }
             seen.put(line.getOutTradeNo(), Boolean.TRUE);
             if (!sameAmount(p.getAmount(), line.getAmount())) {
                 amountMismatch += 1;
-                diffs.add(diff(null, "AMOUNT_MISMATCH", p.getPaymentNo(), line.getChannelTradeNo(),
+                diffs.add(diff("PAY", "AMOUNT_MISMATCH", p.getPaymentNo(), null, line.getChannelTradeNo(),
                         p.getAmount(), line.getAmount(), "金额不一致"));
             } else {
                 matched += 1;
@@ -129,8 +139,60 @@ public class ReconcileServiceImpl implements ReconcileService {
         for (Payment p : local.values()) {
             if (!seen.containsKey(p.getPaymentNo())) {
                 missingChannel += 1;
-                diffs.add(diff(null, "MISSING_CHANNEL", p.getPaymentNo(), p.getChannelTradeNo(),
+                diffs.add(diff("PAY", "MISSING_CHANNEL", p.getPaymentNo(), null, p.getChannelTradeNo(),
                         p.getAmount(), null, "本地已支付，渠道账单中没有该笔"));
+            }
+        }
+
+        // ---------------------------------------------------------------- 退款侧
+        // 退款按「商户退款单号」匹配：我们发给渠道的 out_refund_no 会原样出现在账单里。
+        int refundMatched = 0;
+        int refundMissingLocal = 0;
+        int refundAmountMismatch = 0;
+        int refundMissingChannel = 0;
+
+        if (!refundLines.isEmpty()) {
+            Map<String, AfterSale> localRefunds = afterSaleMapper.selectList(Wrappers.<AfterSale>lambdaQuery()
+                            .eq(AfterSale::getRefundChannel, payChannel.getCode())
+                            .in(AfterSale::getRefundStatus,
+                                    RefundStatus.PROCESSING.getCode(), RefundStatus.SUCCESS.getCode())
+                            .isNotNull(AfterSale::getRefundNo)
+                            .ge(AfterSale::getRefundTime, from)
+                            .lt(AfterSale::getRefundTime, to))
+                    .stream()
+                    .collect(Collectors.toMap(AfterSale::getRefundNo, Function.identity(), (a, b) -> a, LinkedHashMap::new));
+
+            Map<String, Boolean> seenRefund = new LinkedHashMap<>();
+            for (BillLine line : refundLines) {
+                String refundNo = line.getOutRefundNo();
+                if (refundNo == null || refundNo.isBlank()) {
+                    // 账单里的退款行没有商户退款单号就无法可靠匹配，跳过并告警（而不是算成差异制造噪音）
+                    log.warn("[reconcile] refund line without merchant refund no, skipped: outTradeNo={}",
+                            line.getOutTradeNo());
+                    continue;
+                }
+                AfterSale as = localRefunds.get(refundNo);
+                if (as == null) {
+                    refundMissingLocal += 1;
+                    diffs.add(refundDiff("MISSING_LOCAL", refundNo, null, line.getAmount(),
+                            "渠道账单有退款，本地无对应售后记录（钱退了但没记账）"));
+                    continue;
+                }
+                seenRefund.put(refundNo, Boolean.TRUE);
+                if (!sameAmount(as.getRefundAmount(), line.getAmount())) {
+                    refundAmountMismatch += 1;
+                    diffs.add(refundDiff("AMOUNT_MISMATCH", refundNo, as.getRefundAmount(), line.getAmount(),
+                            "退款金额不一致"));
+                } else {
+                    refundMatched += 1;
+                }
+            }
+            for (AfterSale as : localRefunds.values()) {
+                if (!seenRefund.containsKey(as.getRefundNo())) {
+                    refundMissingChannel += 1;
+                    diffs.add(refundDiff("MISSING_CHANNEL", as.getRefundNo(), as.getRefundAmount(), null,
+                            "本地已退款，渠道账单中没有该笔退款"));
+                }
             }
         }
 
@@ -142,6 +204,11 @@ public class ReconcileServiceImpl implements ReconcileService {
         batch.setMissingLocal(missingLocal);
         batch.setMissingChannel(missingChannel);
         batch.setAmountMismatch(amountMismatch);
+        batch.setRefundTotalLines(refundLines.size());
+        batch.setRefundMatched(refundMatched);
+        batch.setRefundMissingLocal(refundMissingLocal);
+        batch.setRefundMissingChannel(refundMissingChannel);
+        batch.setRefundAmountMismatch(refundAmountMismatch);
         batch.setStatus(diffs.isEmpty() ? 1 : 0);
         batchMapper.insert(batch);
 
@@ -150,8 +217,11 @@ public class ReconcileServiceImpl implements ReconcileService {
             diffMapper.insert(d);
         }
 
-        log.info("[reconcile] channel={} date={} lines={} matched={} missingLocal={} missingChannel={} amountMismatch={}",
-                payChannel.getCode(), billDate, lines.size(), matched, missingLocal, missingChannel, amountMismatch);
+        log.info("[reconcile] channel={} date={} payLines={} matched={} missingLocal={} missingChannel={} "
+                        + "amountMismatch={} | refundLines={} refundMatched={} refundMissingLocal={} "
+                        + "refundMissingChannel={} refundAmountMismatch={}",
+                payChannel.getCode(), billDate, payLines.size(), matched, missingLocal, missingChannel, amountMismatch,
+                refundLines.size(), refundMatched, refundMissingLocal, refundMissingChannel, refundAmountMismatch);
 
         ReconcileBatchVO vo = ReconcileBatchVO.from(batch);
         vo.setDiffs(diffs.stream().map(ReconcileDiffVO::from).toList());
@@ -187,16 +257,23 @@ public class ReconcileServiceImpl implements ReconcileService {
         return a.compareTo(b) == 0;
     }
 
-    private static ReconcileDiff diff(Long batchId, String type, String paymentNo, String tradeNo,
-                                      BigDecimal localAmount, BigDecimal channelAmount, String detail) {
+    private static ReconcileDiff diff(String bizType, String type, String paymentNo, String refundNo,
+                                      String tradeNo, BigDecimal localAmount, BigDecimal channelAmount, String detail) {
         ReconcileDiff d = new ReconcileDiff();
-        d.setBatchId(batchId);
+        d.setBizType(bizType);
         d.setDiffType(type);
         d.setPaymentNo(paymentNo);
+        d.setRefundNo(refundNo);
         d.setChannelTradeNo(tradeNo);
         d.setLocalAmount(localAmount);
         d.setChannelAmount(channelAmount);
         d.setDetail(detail);
         return d;
+    }
+
+    /** 退款差异：业务主键是退款单号，没有 payment_no 可填 */
+    private static ReconcileDiff refundDiff(String type, String refundNo,
+                                            BigDecimal localAmount, BigDecimal channelAmount, String detail) {
+        return diff("REFUND", type, null, refundNo, null, localAmount, channelAmount, detail);
     }
 }

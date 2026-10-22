@@ -136,13 +136,32 @@ onMounted(loadHistory)
         </el-descriptions-item>
       </el-descriptions>
 
+      <el-descriptions :column="5" border class="diffs">
+        <el-descriptions-item label="退款条数">{{ result.refundTotalLines ?? 0 }}</el-descriptions-item>
+        <el-descriptions-item label="退款一致">{{ result.refundMatched ?? 0 }}</el-descriptions-item>
+        <el-descriptions-item label="渠道有/本地无">
+          <span :class="{ bad: (result.refundMissingLocal ?? 0) > 0 }">{{ result.refundMissingLocal ?? 0 }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="本地有/渠道无">
+          <span :class="{ bad: (result.refundMissingChannel ?? 0) > 0 }">{{ result.refundMissingChannel ?? 0 }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="金额不一致">
+          <span :class="{ bad: (result.refundAmountMismatch ?? 0) > 0 }">{{ result.refundAmountMismatch ?? 0 }}</span>
+        </el-descriptions-item>
+      </el-descriptions>
+
       <el-table v-if="result.diffs && result.diffs.length" :data="result.diffs" border class="diffs">
+        <el-table-column label="业务" width="80">
+          <template #default="{ row }">{{ row.bizType === 'REFUND' ? '退款' : '支付' }}</template>
+        </el-table-column>
         <el-table-column label="差异类型" width="160">
           <template #default="{ row }">
             <el-tag :type="DIFF_TAG[row.diffType] || 'info'">{{ row.diffTypeText }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="paymentNo" label="商户支付单号" width="220" />
+        <el-table-column label="单号" width="240">
+          <template #default="{ row }">{{ row.bizType === 'REFUND' ? row.refundNo : row.paymentNo }}</template>
+        </el-table-column>
         <el-table-column prop="channelTradeNo" label="渠道交易号" width="200" />
         <el-table-column prop="localAmount" label="本地金额" width="110" />
         <el-table-column prop="channelAmount" label="账单金额" width="110" />

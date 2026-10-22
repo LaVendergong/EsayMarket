@@ -31,6 +31,17 @@ public class ReconcileBatchVO {
 
     private Integer amountMismatch;
 
+    // ---- 退款侧 ----
+    private Integer refundTotalLines;
+
+    private Integer refundMatched;
+
+    private Integer refundMissingLocal;
+
+    private Integer refundMissingChannel;
+
+    private Integer refundAmountMismatch;
+
     private Integer status;
 
     /** 有差异 / 完全一致 */
@@ -52,6 +63,11 @@ public class ReconcileBatchVO {
         vo.setMissingLocal(b.getMissingLocal());
         vo.setMissingChannel(b.getMissingChannel());
         vo.setAmountMismatch(b.getAmountMismatch());
+        vo.setRefundTotalLines(b.getRefundTotalLines());
+        vo.setRefundMatched(b.getRefundMatched());
+        vo.setRefundMissingLocal(b.getRefundMissingLocal());
+        vo.setRefundMissingChannel(b.getRefundMissingChannel());
+        vo.setRefundAmountMismatch(b.getRefundAmountMismatch());
         vo.setStatus(b.getStatus());
         vo.setStatusText(b.getStatus() != null && b.getStatus() == 1 ? "完全一致" : "有差异");
         vo.setCreateTime(b.getCreateTime());
