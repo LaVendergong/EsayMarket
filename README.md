@@ -148,7 +148,7 @@ node scripts/web-flow.mjs
 # 管理后台 UI CRUD（16 项断言：分类增删改禁用 / 商品新增-下架-删除）
 node scripts/admin-crud-verify.mjs
 
-# 售后状态机（44 项断言：申请/撤销/拒绝/同意 + 库存语义 + 越权；会自己停/起后端）
+# 售后 + 退款（52 项断言：状态机 / 库存语义 / 渠道退款 / 重试幂等 / 失败路径 / 越权；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/after-sale-verify.ps1
 
 # 支付链路（34 项断言：支付单/渠道/幂等/回调验签/越权；会自己停/起后端）
@@ -206,6 +206,9 @@ prod 下的行为差异：
   验签 → 校验金额 → 幂等置为已支付 → 订单扣库存加销量。- **售后**：支持「仅退款」「退货退款」两种（**换货不做**，避免半成品）。状态机是
   待商家处理 → 已退款 / 已拒绝 / 已撤销；同一订单同时只能有一个进行中的售后，商家同意才会退款并（退货退款时）恢复库存。
   入口：订单详情、我的 → 我的售后；后台「售后处理」菜单。
+  **退款会真正打到原支付渠道**（MOCK / 支付宝 `alipay.trade.refund` / 微信 `/v3/refund/domestic/refunds`）：
+  退款单号由售后单号派生（渠道侧幂等，重试不会重复退钱）；退款失败时售后保持待处理、失败原因落库，
+  订单不会被标成"已退款"。售后状态与退款状态是两个字段（同意 ≠ 钱到账）。  入口：订单详情、我的 → 我的售后；后台「售后处理」菜单。
 - **备份**：`scripts/backup-db.ps1` 做一致性快照（保留最近 7 份）；`scripts/backup-restore-verify.ps1`
   会真的备份→恢复到临时库→逐表比对→清理，用来证明「备份能恢复」。**没有恢复过的备份不算备份。**
 - **监控**：两个后端都暴露 `/actuator/prometheus`（JVM / 连接池 / HTTP 指标 + 两个业务计数器）。
@@ -218,7 +221,7 @@ prod 下的行为差异：
 > 这个自检是必需的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把解析不了的占位符
 > **原样保留而不是报错**，只靠 YAML 写 `${MALL_JWT_SECRET}` 拦不住（详见 `docs/AI-HANDOFF.md` §8 第 26 条）。
 
-CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V9、两个前端 typecheck+build。
+CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V10、两个前端 typecheck+build。
 
 ## 几个必须知道的坑
 

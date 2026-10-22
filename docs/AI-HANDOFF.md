@@ -113,7 +113,7 @@ D:\projects\mall\
 │   ├── backup-restore-verify.ps1 备份恢复**演练**（13 项断言：备份→恢复→逐表比对→清理）
 │   ├── metrics-verify.ps1        监控验证（16 项断言：prometheus 端点 + 业务计数器真的会动）
 │   ├── admin-crud-verify.mjs     后台分类/商品的 **UI** CRUD 验证（16 项断言）
-│   ├── after-sale-verify.ps1     售后状态机（44 项断言：申请/撤销/拒绝/同意 + 库存语义 + 越权）
+│   ├── after-sale-verify.ps1     售后 + 退款（52 项断言：状态机/库存语义/渠道退款/重试幂等/失败路径/越权）
 │   ├── payment-verify.ps1        支付链路（34 项断言：支付单/渠道/幂等/回调验签/越权）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
 │   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
@@ -758,7 +758,16 @@ node scripts\web-flow.mjs      # 需要：两个后端 + 两个前端 dev server
 81. **微信回调没有平台证书时必须拒绝**，不能"验不了就放过"——那等于谁都能伪造"支付成功"。
     本地联调要显式开 `mall.pay.wechat.allow-unverified-notify=true`，并且日志里会打 WARN。
 82. **支付回调路径必须匿名可达**：渠道服务器不带我们的 token，把它关进鉴权里就永远收不到回调。
-    安全边界完全靠验签（支付宝 RSA2 / 微信平台证书），验不过直接抛异常，走不到改订单状态那一步。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
+    安全边界完全靠验签（支付宝 RSA2 / 微信平台证书），验不过直接抛异常，走不到改订单状态那一步。83. **"同意售后"和"钱到账"是两件事**，必须分成两个字段记（`status` / `refund_status`）：
+    微信退款会返回 `PROCESSING`（已受理未到账），这时候说"已退款"是骗用户；
+    卡在待处理又不告诉客服能不能重试。同理适用于任何"本地决定 + 外部动作"的场景。
+84. **退款单号必须由业务单号派生且可重复**（`RF` + 售后单号）：支付宝按 `out_request_no`、
+    微信按 `out_refund_no` 幂等。用随机号的话，一次超时重试就会退两次钱。
+85. **外部渠道调用不要包在数据库事务里**：一是秒级 IO 会占住连接，二是**失败记录会被回滚** ——
+    抛异常后客服看不到任何失败原因。正确顺序：先调渠道（不在事务里）→ 记录结果 →
+    再用 `TransactionTemplate` 包住"售后单 + 订单 + 库存"那几步。
+86. **先退钱再改状态**，不要先标"已退款"再调渠道：后者一旦渠道失败，用户看到已退款却没收到钱，
+    这是资金差错而不是体验问题。68. **initdb 会把中文写成「双重编码」，而且应用侧救不回来**：只设 `--character-set-server=utf8mb4`
     是不够的 —— 它只改服务端默认，**建连接时客户端仍会声明自己的字符集**（本机实测是 latin1），
     于是 UTF-8 的中文被当 latin1 收下再按 utf8mb4 存：`小米` → `å°ç±³`（HEX 里出现 `C3A5` 前缀）。
     判据：`SELECT HEX(name)` 正常 CJK 是 `E4..E9` 开头，双重编码必然是 `C3Ax`。
@@ -919,6 +928,68 @@ prod 下 `ProductionConfigGuard` 直接拦掉含 `*` 的配置。顺带把 `X-Tr
 2. ~~token 存 localStorage~~ → **已改 HttpOnly Cookie**（见下）。但 **7 天有效期 + 无吊销机制**仍在：token 一旦以别的方式泄露（被抓包、被中间件记录），到期前一直有效。要根治得加 refresh token + jti 黑名单。
 3. **管理员看手机号是明文**（发货需要），没有做响应脱敏。
 4. ~~密钥轮换没做~~ → **已支持双密钥轮换 + 一次性重加密**（见下方「密钥轮换」小节，`crypto-rotate-verify.ps1` 演练 28/28）。
+
+### 退款真正打到渠道（`after-sale-verify.ps1` 52/52）
+
+**改动前**：售后「同意退款」只是把订单标成已退款 + 恢复库存 —— **钱一分没退**。
+用户看到"已退款"，账户里却没有钱，这是最典型的资金差错。
+
+#### 两个状态必须分开
+
+| | 含义 | 取值 |
+|---|---|---|
+| `t_after_sale.status` | 业务决定（商家同不同意） | 0 待处理 / 1 已同意 / 2 已拒绝 / 3 已撤销 |
+| `t_after_sale.refund_status` | 外部动作（钱退没退成） | 0 未退款 / 1 退款中 / 2 退款成功 / 3 退款失败 |
+
+合成一个字段就会出问题：微信退款可能返回 `PROCESSING`（已受理未到账），这时候说"已退款"是骗用户；
+而如果因此把售后卡在"待处理"，客服又不知道到底该不该重试。
+
+#### 顺序：先退钱，再改状态
+
+反过来的写法（先标已退款再调渠道）一旦渠道失败，用户看到"已退款"但没收到钱 —— 这是资金差错。
+所以 `approve()`：
+
+```
+1. 调渠道退款（幂等）   ← 失败：记录 refund_status=3 + 原因，抛错，售后仍是待处理
+2. 事务内：售后单 → 已同意 / 订单 → 已退款 / 退货退款恢复库存
+```
+
+#### 三个关键细节
+
+1. **退款单号由售后单号派生**（`RF` + afterSaleNo）：失败后重试复用同一个号，
+   支付宝按 `out_request_no`、微信按 `out_refund_no` 幂等 —— **绝不会重复退钱**
+2. **外部调用不放在数据库事务里**：调渠道是秒级 IO，包在事务里会占住连接；
+   更重要的是失败记录必须**提交**下来（放在会回滚的事务里，客服什么都看不到）
+3. **事务边界用 `TransactionTemplate` 显式控制**：只有第 2 步（售后单+订单+库存）需要原子性
+
+#### 渠道实现
+
+| 渠道 | 接口 | 幂等键 |
+|---|---|---|
+| MOCK | 直接成功（本地/自动化） | refundNo |
+| 支付宝 | `alipay.trade.refund`（同步） | `out_request_no` |
+| 微信 | `POST /v3/refund/domestic/refunds` | `out_refund_no` |
+
+> **已知限制**：两个真实渠道的**响应没有做验签**（需要平台证书/支付宝公钥的响应签名规范）。
+> 我们作为客户端走 TLS 直连固定网关、只从响应里取 code 和退款单号；
+> 在拿不到商户资质、无法与真实网关联调的前提下，草率实现响应验签反而可能误拒正常响应，
+> 所以先不做并在这里记明，而不是假装验过。
+
+#### 验证（52/52，节选）
+
+```
+[PASS] E2b refund really went through the channel (2|MOCK|RFAS...) :: row=2|MOCK|RFAS202610220937097644
+[PASS] E6b retry reuses the same refund no (no second refund) :: refundNo=RFAS202610220937097644
+[PASS] F4 return-refund also refunded through the channel :: refund_status=2
+[PASS] H2 approve fails when there is no successful payment (4002) :: code=4002
+[PASS] H3 after-sale stays PENDING and refund marked FAILED (0|3) :: state=0|3
+[PASS] H5 order stays in AFTER_SALE(5) on failure (not refunded) :: status=5
+```
+
+失败路径是刻意造的：把该订单的支付记录删掉（模拟"钱收不到/记录丢失"），
+审批必须失败、售后保持待处理、`refund_status=3` 且原因落库，订单**不能**变成已退款。
+
+界面上：H5 售后详情多「退款单号 / 退款状态」，后台售后列表多「退款」列（未退款 / 退款中 / 已退款 / 退款失败）。
 
 ### 支付：收银台 + 支付单 + 三渠道（`payment-verify.ps1` 34/34 + `web-flow` 61/61）
 
@@ -1387,6 +1458,7 @@ powershell ... -File scripts\backup-restore-verify.ps1
 | 购物流程手感优化 | ✅ | 见下方「购物流程手感优化」；`web-flow` **57/57** |
 | 售后（退款 / 退货退款） | ✅ | 见下方「售后」；`after-sale-verify.ps1` **44/44** + UI 11 条 |
 | 支付（收银台 / 支付单 / 三渠道） | ✅ | 见下方「支付」；`payment-verify.ps1` **34/34** + UI 6 条 |
+| 退款打到渠道 | ✅ | 见下方「退款真正打到渠道」；`after-sale-verify.ps1` **52/52**（含失败路径） |
 | 测试覆盖（后台 CRUD 的 UI） | ✅ | `admin-crud-verify.mjs` 16/16（分类增删改禁用、商品新增/下架/详情/删除） |
 
 ### P1 下单幂等（22/22）

@@ -27,4 +27,12 @@ public interface PaymentService {
 
     /** 兼容旧的「去支付」接口：等价于用 MOCK 渠道创建并立即支付 */
     PaymentVO payWithMock(Long userId, Long orderId);
+
+    /**
+     * 原路退款：找到该订单成功的那笔支付，按它当时的渠道退回去。
+     *
+     * @param refundNo 商户退款单号，必须**可重复**（重试复用同一个号，渠道据此幂等）
+     */
+    com.mall.core.pay.PayModels.RefundResult refund(Long orderId, String refundNo,
+                                                   java.math.BigDecimal amount, String reason);
 }

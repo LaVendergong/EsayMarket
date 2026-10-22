@@ -45,6 +45,8 @@ public class WechatNativeChannel implements PaymentChannel {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String PATH = "/v3/pay/transactions/native";
+    /** 退款接口（申请退款） */
+    private static final String PATH_REFUND = "/v3/refund/domestic/refunds";
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(8))
             .build();
@@ -120,6 +122,90 @@ public class WechatNativeChannel implements PaymentChannel {
             log.warn("[pay] wechat native call error: {}", e.toString());
             throw new BusinessException(ResultCode.PAY_CHANNEL_UNAVAILABLE, "微信支付下单请求失败");
         }
+    }
+
+    /**
+     * 原路退款（{@code POST /v3/refund/domestic/refunds}）。
+     *
+     * <p>{@code out_refund_no} 传我们的退款单号，微信按它幂等。
+     * 返回 {@code PROCESSING} 表示"已受理、还没到账"，这种情况记成「退款中」而不是「退款成功」——
+     * 告诉用户"钱已到账"但实际没到，是最容易招投诉的错误。
+     *
+     * <p>已知限制：响应没有验签（需要平台证书），理由同支付宝渠道。
+     */
+    @Override
+    public PayModels.RefundResult refund(PayModels.RefundCommand command) {
+        PayProperties.Wechat cfg = properties.getWechat();
+        if (!available()) {
+            throw new BusinessException(ResultCode.PAY_CHANNEL_UNAVAILABLE, "微信支付渠道未配置");
+        }
+        long refundFen = toFen(command.getAmount());
+        long totalFen = toFen(command.getTotalAmount());
+        if (refundFen <= 0) {
+            throw new BusinessException(ResultCode.REFUND_FAILED, "退款金额必须大于 0");
+        }
+        if (totalFen > 0 && refundFen > totalFen) {
+            throw new BusinessException(ResultCode.REFUND_FAILED, "退款金额不能大于原支付金额");
+        }
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("out_trade_no", command.getPaymentNo());
+        body.put("out_refund_no", command.getRefundNo());
+        if (command.getReason() != null && !command.getReason().isBlank()) {
+            body.put("reason", command.getReason());
+        }
+        Map<String, Object> amount = new LinkedHashMap<>();
+        amount.put("refund", refundFen);
+        amount.put("total", totalFen);
+        amount.put("currency", "CNY");
+        body.put("amount", amount);
+
+        String bodyJson;
+        try {
+            bodyJson = JSON.writeValueAsString(body);
+        } catch (Exception e) {
+            throw new BusinessException(ResultCode.FAILED, "退款请求参数序列化失败");
+        }
+
+        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String nonce = randomNonce();
+        String authorization = buildAuthorization(cfg, "POST", PATH_REFUND, bodyJson, timestamp, nonce);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(cfg.getApiBase() + PATH_REFUND))
+                .timeout(Duration.ofSeconds(15))
+                .header("Authorization", authorization)
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(bodyJson, StandardCharsets.UTF_8))
+                .build();
+        try {
+            HttpResponse<String> resp = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            String respBody = resp.body();
+            if (resp.statusCode() != 200) {
+                log.warn("[pay] wechat refund rejected status={} body={}", resp.statusCode(), respBody);
+                return PayModels.RefundResult.builder().success(false).raw(respBody).build();
+            }
+            var node = JSON.readTree(respBody);
+            String status = node.path("status").asText("");
+            boolean ok = "SUCCESS".equals(status) || "PROCESSING".equals(status);
+            return PayModels.RefundResult.builder()
+                    .success(ok)
+                    .pending("PROCESSING".equals(status))
+                    .channelRefundNo(node.path("refund_id").asText(null))
+                    .raw(respBody)
+                    .build();
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("[pay] wechat refund call error: {}", e.toString());
+            throw new BusinessException(ResultCode.REFUND_FAILED, "微信退款请求失败");
+        }
+    }
+
+    private static long toFen(BigDecimal yuan) {
+        return yuan == null ? 0L
+                : yuan.multiply(BigDecimal.valueOf(100)).setScale(0, java.math.RoundingMode.HALF_UP).longValue();
     }
 
     @Override

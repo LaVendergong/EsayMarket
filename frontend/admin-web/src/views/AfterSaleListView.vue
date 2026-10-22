@@ -108,6 +108,14 @@ onMounted(load)
           <el-tag :type="STATUS_TAG[row.status]?.type || 'info'">{{ STATUS_TAG[row.status]?.label }}</el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="退款" width="110">
+        <template #default="{ row }">
+          <el-tag v-if="row.refundStatus === 3" type="danger">退款失败</el-tag>
+          <el-tag v-else-if="row.refundStatus === 2" type="success">已退款</el-tag>
+          <el-tag v-else-if="row.refundStatus === 1" type="warning">退款中</el-tag>
+          <span v-else class="muted">未退款</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="applyTime" label="申请时间" width="180" />
       <el-table-column label="操作" width="170" fixed="right">
         <template #default="{ row }">

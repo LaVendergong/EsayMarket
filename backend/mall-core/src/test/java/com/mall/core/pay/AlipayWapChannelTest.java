@@ -153,6 +153,31 @@ class AlipayWapChannelTest {
         assertThat(e.getCode()).isEqualTo(ResultCode.PAY_CHANNEL_UNAVAILABLE.getCode());
     }
 
+    @Test
+    void refundParams_areSignedAndCarryOurRefundNo() {
+        PayModels.RefundCommand cmd = PayModels.RefundCommand.builder()
+                .paymentNo("P20261021120000001")
+                .refundNo("RFAS20261021120000001")
+                .amount(new BigDecimal("199.00"))
+                .totalAmount(new BigDecimal("199.00"))
+                .reason("售后退款")
+                .build();
+
+        Map<String, String> params = channel.buildRefundParams(cmd);
+
+        assertThat(params.get("method")).isEqualTo("alipay.trade.refund");
+        // out_request_no 必须是我们的退款单号 —— 支付宝按它做幂等，重试才不会重复退钱
+        assertThat(params.get("biz_content")).contains("\"out_request_no\":\"RFAS20261021120000001\"");
+        assertThat(params.get("biz_content")).contains("\"refund_amount\":\"199.00\"");
+        assertThat(RsaSigner.verify(AlipayWapChannel.signContent(params), params.get("sign"),
+                properties.getAlipay().getPublicKey())).isTrue();
+
+        Map<String, String> tampered = new LinkedHashMap<>(params);
+        tampered.put("biz_content", tampered.get("biz_content").replace("199.00", "9.99"));
+        assertThat(RsaSigner.verify(AlipayWapChannel.signContent(tampered), params.get("sign"),
+                properties.getAlipay().getPublicKey())).isFalse();
+    }
+
     /** 把 URL 的 query 解析回 map（值已 URL 解码），用来断言签名 */
     private static Map<String, String> parseQuery(String url) {
         Map<String, String> out = new LinkedHashMap<>();

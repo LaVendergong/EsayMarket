@@ -21,6 +21,27 @@ public interface PaymentChannel {
     PayModels.CreateResult create(PayModels.CreateCommand command);
 
     /**
+     * 该渠道是否支持原路退款。
+     *
+     * <p>默认支持；如果某个渠道只能收不能退（例如某些虚拟账户），返回 false，
+     * 售后审批会退化成"人工线下退款"，而不是假装退成功。
+     */
+    default boolean supportsRefund() {
+        return true;
+    }
+
+    /**
+     * 原路退款。
+     *
+     * <p>必须做到两点：
+     * <ul>
+     *   <li><b>幂等</b>：同一个 {@code refundNo} 重复调用不能退两次（支付宝按 out_request_no、微信按 out_refund_no）</li>
+     *   <li><b>不抛"成功"</b>：渠道没明确说成功，就返回 success=false，不能吞掉</li>
+     * </ul>
+     */
+    PayModels.RefundResult refund(PayModels.RefundCommand command);
+
+    /**
      * 解析并校验渠道回调。
      *
      * @param params  表单参数（支付宝回调是 form）

@@ -155,5 +155,11 @@ export interface AfterSaleVO {
   applyTime?: string
   handleTime?: string
   handleRemark?: string
+  refundNo?: string
+  refundChannel?: string
+  refundStatus?: number
+  refundStatusText?: string
+  refundTime?: string
+  refundError?: string
   items?: OrderItemVO[]
 }

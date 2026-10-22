@@ -3,6 +3,7 @@ package com.mall.core.model.vo;
 import com.mall.core.entity.AfterSale;
 import com.mall.core.enums.AfterSaleStatus;
 import com.mall.core.enums.AfterSaleType;
+import com.mall.core.enums.RefundStatus;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 
@@ -44,6 +45,19 @@ public class AfterSaleVO {
 
     private String handleRemark;
 
+    /** 退款执行情况（和售后单状态分开看） */
+    private String refundNo;
+
+    private String refundChannel;
+
+    private Integer refundStatus;
+
+    private String refundStatusText;
+
+    private LocalDateTime refundTime;
+
+    private String refundError;
+
     /** 订单商品快照：只在详情里填，列表不查（避免 N+1） */
     private List<OrderItemVO> items;
 
@@ -63,6 +77,12 @@ public class AfterSaleVO {
         vo.setApplyTime(a.getApplyTime());
         vo.setHandleTime(a.getHandleTime());
         vo.setHandleRemark(a.getHandleRemark());
+        vo.setRefundNo(a.getRefundNo());
+        vo.setRefundChannel(a.getRefundChannel());
+        vo.setRefundStatus(a.getRefundStatus());
+        vo.setRefundStatusText(RefundStatus.textOf(a.getRefundStatus()));
+        vo.setRefundTime(a.getRefundTime());
+        vo.setRefundError(a.getRefundError());
         return vo;
     }
 }

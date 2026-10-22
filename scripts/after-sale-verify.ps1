@@ -193,6 +193,10 @@ Check 'E1 third application succeeds' ((Code $ap3) -eq 200 -and $asId3 -gt 0) "i
 
 $ok = Http-Json -Method POST -Url "$admin/api/v1/admin/after-sale/$asId3/approve" -Token $adminToken -Body @{ remark = '同意退款' } -Name '61-approve'
 Check 'E2 approve succeeds' ((Code $ok) -eq 200) "code=$(Code $ok)"
+
+# 关键：同意之后**钱真的退回去了**（走原支付渠道），不是只把状态改一下
+$refundRow = Sql "SELECT CONCAT(refund_status,'|',IFNULL(refund_channel,'-'),'|',IFNULL(refund_no,'-')) FROM t_after_sale WHERE id = $asId3;"
+Check 'E2b refund really went through the channel (2|MOCK|RFAS...)' ($refundRow -like '2|MOCK|RFAS*') "row=$refundRow"
 Check 'E3 after-sale status = APPROVED(1)' ((Sql "SELECT status FROM t_after_sale WHERE id = $asId3;") -eq '1') "status=$(Sql "SELECT status FROM t_after_sale WHERE id = $asId3;")"
 Check 'E4 order moved to REFUNDED(6)' ((Sql "SELECT status FROM t_order WHERE id = $orderPaid;") -eq '6') "status=$(Sql "SELECT status FROM t_order WHERE id = $orderPaid;")"
 
@@ -201,6 +205,9 @@ Check 'E5 refund-only does NOT restore stock' ($stockAfterRefundOnly -eq $stockB
 
 $ok2 = Http-Json -Method POST -Url "$admin/api/v1/admin/after-sale/$asId3/approve" -Token $adminToken -Body @{ remark = 'again' } -Name '62-approve-again'
 Check 'E6 approving twice is rejected (3004, no double refund)' ((Code $ok2) -eq 3004) "code=$(Code $ok2)"
+
+$refundNoAfter = Sql "SELECT IFNULL(refund_no,'-') FROM t_after_sale WHERE id = $asId3;"
+Check 'E6b retry reuses the same refund no (no second refund)' ($refundNoAfter -like 'RFAS*') "refundNo=$refundNoAfter"
 
 $e7 = Http-Json -Method POST -Url "$portal/api/v1/portal/after-sale" -Token $token -Body @{ orderId = $orderPaid; type = 2; reason = '再来一次' } -Name '63-apply-refunded'
 Check 'E7 applying again on a refunded order is rejected (3006)' ((Code $e7) -eq 3006) "code=$(Code $e7)"
@@ -220,6 +227,9 @@ Check 'F2 order moved to REFUNDED(6)' ((Sql "SELECT status FROM t_order WHERE id
 $stockFAfter = [int](Sql "SELECT stock FROM t_sku WHERE id = $skuId;")
 Check 'F3 return-refund restores stock (+2)' (($stockFAfter - $stockF) -eq 2) "stock $stockF -> $stockFAfter (expected +2)"
 
+$refundRowF = Sql "SELECT IFNULL(refund_status,0) FROM t_after_sale WHERE id = $asIdF;"
+Check 'F4 return-refund also refunded through the channel' ($refundRowF -eq '2') "refund_status=$refundRowF"
+
 # ============================================================ G) 列表与权限
 Write-Host ''
 Write-Host '== G) lists and permissions =='
@@ -238,7 +248,27 @@ Check 'G4 a normal user cannot read the admin after-sale list (403)' ($g4.http -
 $g5 = Http-Json -Method GET -Url "$portal/api/v1/portal/after-sale/page" -Name '84-anon'
 Check 'G5 anonymous request is rejected (401)' ($g5.http -eq 401) "http=$($g5.http)"
 
+# ============================================================ H) 退款失败路径
+Write-Host ''
+Write-Host '== H) refund failure path =='
+# 模拟「钱没收到 / 支付记录丢失」：把支付单删掉再审批
+$orderFail = NewOrder 1 $true
+$apFail = Http-Json -Method POST -Url "$portal/api/v1/portal/after-sale" -Token $token -Body @{ orderId = $orderFail; type = 1; reason = '退款失败路径' } -Name '90-apply-fail'
+$asIdFail = [long](Payload $apFail)
+Check 'H1 application for the failure-path order succeeds' ((Code $apFail) -eq 200 -and $asIdFail -gt 0) "id=$asIdFail"
+
+Sql "DELETE FROM t_payment WHERE order_id = $orderFail;" | Out-Null
+$failApprove = Http-Json -Method POST -Url "$admin/api/v1/admin/after-sale/$asIdFail/approve" -Token $adminToken -Body @{ remark = 'should fail' } -Name '91-approve-no-payment'
+Check 'H2 approve fails when there is no successful payment (4002)' ((Code $failApprove) -eq 4002) "code=$(Code $failApprove)"
+
+$failState = Sql "SELECT CONCAT(status,'|',IFNULL(refund_status,0)) FROM t_after_sale WHERE id = $asIdFail;"
+Check 'H3 after-sale stays PENDING and refund marked FAILED (0|3)' ($failState -eq '0|3') "state=$failState"
+$failErr = Sql "SELECT IFNULL(refund_error,'-') FROM t_after_sale WHERE id = $asIdFail;"
+Check 'H4 failure reason is recorded for the agent' ($failErr.Length -gt 1) "refundError=$failErr"
+Check 'H5 order stays in AFTER_SALE(5) on failure (not refunded)' ((Sql "SELECT status FROM t_order WHERE id = $orderFail;") -eq '5') "status=$(Sql "SELECT status FROM t_order WHERE id = $orderFail;")"
+
 # ============================================================ cleanup
+
 Write-Host ''
 Write-Host '== cleanup =='
 Purge

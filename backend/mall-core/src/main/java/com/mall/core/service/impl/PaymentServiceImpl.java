@@ -201,6 +201,38 @@ public class PaymentServiceImpl implements PaymentService {
     }
 
     @Override
+    public PayModels.RefundResult refund(Long orderId, String refundNo, BigDecimal amount, String reason) {
+        // 退到"实际收钱的那笔"：按 id 倒序取最近一笔 PAID，避免拿到早期失败/关闭的单
+        Payment p = paymentMapper.selectOne(Wrappers.<Payment>lambdaQuery()
+                .eq(Payment::getOrderId, orderId)
+                .eq(Payment::getStatus, PaymentStatus.PAID.getCode())
+                .orderByDesc(Payment::getId)
+                .last("LIMIT 1"));
+        if (p == null) {
+            throw new BusinessException(ResultCode.PAYMENT_NOT_FOUND, "该订单没有成功的支付记录，无法原路退款");
+        }
+        PaymentChannel impl = channels.get(p.getChannel());
+        if (impl == null || !impl.available()) {
+            throw new BusinessException(ResultCode.REFUND_NOT_SUPPORTED, "原支付渠道不可用，无法原路退款");
+        }
+        if (!impl.supportsRefund()) {
+            throw new BusinessException(ResultCode.REFUND_NOT_SUPPORTED, "原支付渠道不支持自动退款，请线下处理");
+        }
+
+        PayModels.RefundResult result = impl.refund(PayModels.RefundCommand.builder()
+                .paymentNo(p.getPaymentNo())
+                .refundNo(refundNo)
+                .amount(amount)
+                .totalAmount(p.getAmount())
+                .reason(reason)
+                .build());
+        result.setChannel(p.getChannel());
+        log.info("[pay] refund orderNo={} paymentNo={} refundNo={} amount={} channel={} success={} pending={}",
+                p.getOrderNo(), p.getPaymentNo(), refundNo, amount, p.getChannel(), result.isSuccess(), result.isPending());
+        return result;
+    }
+
+    @Override
     @Transactional
     public PaymentVO payWithMock(Long userId, Long orderId) {
         PaymentVO vo = create(userId, orderId, PayChannel.MOCK.getCode());

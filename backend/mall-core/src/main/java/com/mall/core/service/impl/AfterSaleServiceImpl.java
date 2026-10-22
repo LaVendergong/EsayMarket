@@ -13,6 +13,7 @@ import com.mall.core.entity.OrderItem;
 import com.mall.core.enums.AfterSaleStatus;
 import com.mall.core.enums.AfterSaleType;
 import com.mall.core.enums.OrderStatus;
+import com.mall.core.enums.RefundStatus;
 import com.mall.core.mapper.AfterSaleMapper;
 import com.mall.core.mapper.OrderItemMapper;
 import com.mall.core.mapper.OrderMapper;
@@ -20,11 +21,14 @@ import com.mall.core.mapper.SkuMapper;
 import com.mall.core.model.dto.AfterSaleApplyDTO;
 import com.mall.core.model.vo.AfterSaleVO;
 import com.mall.core.model.vo.OrderItemVO;
+import com.mall.core.pay.PayModels;
 import com.mall.core.service.AfterSaleService;
-import lombok.RequiredArgsConstructor;
+import com.mall.core.service.PaymentService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -48,7 +52,6 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AfterSaleServiceImpl implements AfterSaleService {
 
     private static final DateTimeFormatter NO_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
@@ -57,6 +60,23 @@ public class AfterSaleServiceImpl implements AfterSaleService {
     private final OrderMapper orderMapper;
     private final OrderItemMapper orderItemMapper;
     private final SkuMapper skuMapper;
+    private final PaymentService paymentService;
+    /** 审批的最后一步（售后单 + 订单 + 库存）要用事务包住，但退款那次外部调用不能包在里面 */
+    private final TransactionTemplate transactionTemplate;
+
+    public AfterSaleServiceImpl(AfterSaleMapper afterSaleMapper,
+                                OrderMapper orderMapper,
+                                OrderItemMapper orderItemMapper,
+                                SkuMapper skuMapper,
+                                PaymentService paymentService,
+                                PlatformTransactionManager transactionManager) {
+        this.afterSaleMapper = afterSaleMapper;
+        this.orderMapper = orderMapper;
+        this.orderItemMapper = orderItemMapper;
+        this.skuMapper = skuMapper;
+        this.paymentService = paymentService;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
+    }
 
     // ================================================================ 用户侧
 
@@ -157,30 +177,93 @@ public class AfterSaleServiceImpl implements AfterSaleService {
         return toDetail(require(id));
     }
 
+    /**
+     * 同意售后 = **先把钱真退回去，再改状态**。
+     *
+     * <p>顺序不能反：如果先标「已退款」再调渠道，一旦渠道失败，用户看到的是"已退款"但没收到钱，
+     * 这是最容易变成投诉/资金差错的一种顺序。
+     *
+     * <p>两个刻意的设计：
+     * <ul>
+     *   <li><b>方法本身不开事务</b>：调用渠道是外部 IO，把它包在事务里会让数据库连接被占住十几秒；
+     *       而且退款失败时我们需要把失败原因**提交**下来（否则抛异常会把记录一起回滚掉，客服什么也看不到）。</li>
+     *   <li><b>退款单号由售后单号派生</b>（{@code RF + afterSaleNo}）：失败后重试复用同一个号，
+     *       支付宝/微信按它幂等，绝不会重复退钱。</li>
+     * </ul>
+     */
     @Override
-    @Transactional
     public void approve(Long id, String remark) {
         AfterSale as = require(id);
         if (!Objects.equals(as.getStatus(), AfterSaleStatus.PENDING.getCode())) {
             throw new BusinessException(ResultCode.AFTER_SALE_STATUS_ERROR);
         }
-        // 先改售后单：影响 0 行 = 已被其他客服处理过，直接拒绝，避免重复退款
-        if (markHandled(id, AfterSaleStatus.APPROVED, remark) == 0) {
-            throw new BusinessException(ResultCode.AFTER_SALE_STATUS_ERROR);
-        }
-        // 订单：售后中 -> 已退款
-        if (transitionOrder(as.getOrderId(), null, OrderStatus.AFTER_SALE.getCode(), OrderStatus.REFUNDED.getCode()) == 0) {
-            throw new BusinessException(ResultCode.ORDER_STATUS_ERROR);
-        }
-        // 退货退款：货退回仓库，库存加回去（仅退款不加，否则账面库存虚高会超卖）
-        if (AfterSaleType.needsStockRestore(as.getType())) {
-            for (OrderItem item : itemsOf(as.getOrderId())) {
-                skuMapper.restoreStock(item.getSkuId(), item.getQuantity());
+
+        // 1) 真退款（已经退成功过的重试直接跳过，避免无谓的渠道调用）
+        if (!Objects.equals(as.getRefundStatus(), RefundStatus.SUCCESS.getCode())) {
+            String refundNo = refundNoOf(as);
+            PayModels.RefundResult result;
+            try {
+                result = paymentService.refund(as.getOrderId(), refundNo, as.getRefundAmount(),
+                        "售后退款 " + as.getAfterSaleNo());
+            } catch (BusinessException e) {
+                recordRefundFailure(as.getId(), e.getMessage());
+                throw e;
             }
+            if (!result.isSuccess()) {
+                recordRefundFailure(as.getId(), "渠道未受理退款");
+                throw new BusinessException(ResultCode.REFUND_FAILED, "渠道退款失败，稍后可重试（不会重复退款）");
+            }
+            recordRefundSuccess(as.getId(), refundNo, result.getChannel(), result.isPending());
         }
-        log.info("[after-sale] approved no={} orderNo={} type={} amount={} stockRestored={}",
+
+        // 2) 状态流转（放在事务里：售后单 + 订单 + 库存 必须一起成功）
+        transactionTemplate.executeWithoutResult(status -> {
+            // 影响 0 行 = 已被其他客服处理过
+            if (markHandled(id, AfterSaleStatus.APPROVED, remark) == 0) {
+                throw new BusinessException(ResultCode.AFTER_SALE_STATUS_ERROR);
+            }
+            // 订单：售后中 -> 已退款
+            if (transitionOrder(as.getOrderId(), null,
+                    OrderStatus.AFTER_SALE.getCode(), OrderStatus.REFUNDED.getCode()) == 0) {
+                throw new BusinessException(ResultCode.ORDER_STATUS_ERROR);
+            }
+            // 退货退款：货退回仓库，库存加回去（仅退款不加，否则账面库存虚高会超卖）
+            if (AfterSaleType.needsStockRestore(as.getType())) {
+                for (OrderItem item : itemsOf(as.getOrderId())) {
+                    skuMapper.restoreStock(item.getSkuId(), item.getQuantity());
+                }
+            }
+        });
+
+        log.info("[after-sale] approved no={} orderNo={} type={} amount={} refundNo={} channel={} stockRestored={}",
                 as.getAfterSaleNo(), as.getOrderNo(), as.getType(), as.getRefundAmount(),
-                AfterSaleType.needsStockRestore(as.getType()));
+                refundNoOf(as), as.getRefundChannel(), AfterSaleType.needsStockRestore(as.getType()));
+    }
+
+    /** 退款单号：由售后单号派生，重试永远同一个号（渠道据此幂等） */
+    private static String refundNoOf(AfterSale as) {
+        return "RF" + as.getAfterSaleNo();
+    }
+
+    /** 退款失败要**提交**下来给客服看（所以不能放在会回滚的事务里） */
+    private void recordRefundFailure(Long id, String reason) {
+        AfterSale patch = new AfterSale();
+        patch.setId(id);
+        patch.setRefundStatus(RefundStatus.FAILED.getCode());
+        patch.setRefundError(reason == null ? null : reason.substring(0, Math.min(reason.length(), 190)));
+        afterSaleMapper.updateById(patch);
+        log.warn("[after-sale] refund failed id={} reason={}", id, reason);
+    }
+
+    private void recordRefundSuccess(Long id, String refundNo, String channel, boolean pending) {
+        AfterSale patch = new AfterSale();
+        patch.setId(id);
+        patch.setRefundNo(refundNo);
+        patch.setRefundChannel(channel);
+        patch.setRefundStatus(pending ? RefundStatus.PROCESSING.getCode() : RefundStatus.SUCCESS.getCode());
+        patch.setRefundTime(LocalDateTime.now());
+        patch.setRefundError(null);
+        afterSaleMapper.updateById(patch);
     }
 
     @Override

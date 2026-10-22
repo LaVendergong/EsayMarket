@@ -38,6 +38,35 @@ public final class PayModels {
         private String channelTradeNo;
     }
 
+    /** 退款请求 */
+    @Data
+    @Builder
+    public static class RefundCommand {
+        /** 原支付单号（我们的） */
+        private String paymentNo;
+        /** 商户退款单号：必须由业务侧生成且**可重复**，渠道按它做幂等 */
+        private String refundNo;
+        private BigDecimal amount;
+        /** 原支付金额：微信退款接口要求同时传 total，用来校验退款不超过原额 */
+        private BigDecimal totalAmount;
+        private String reason;
+    }
+
+    /** 退款结果 */
+    @Data
+    @Builder
+    public static class RefundResult {
+        /** 渠道是否明确受理/完成退款 */
+        private boolean success;
+        /** 渠道退款单号（支付宝 refund_fee 对应的 trade_no / 微信 refund_id） */
+        private String channelRefundNo;
+        /** 实际走的是哪个渠道（由 PaymentService 填，售后单要记下来） */
+        private String channel;
+        /** 异步受理（微信可能返回 PROCESSING）：已受理但还没到账 */
+        private boolean pending;
+        private String raw;
+    }
+
     /** 渠道回调解析结果 */
     @Data
     @Builder

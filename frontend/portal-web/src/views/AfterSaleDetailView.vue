@@ -123,6 +123,12 @@ onMounted(load)
         <van-cell title="订单编号" :value="as.orderNo" />
         <van-cell title="售后类型" :value="as.typeText" />
         <van-cell title="退款金额" :value="money(as.refundAmount)" class="amount" />
+        <van-cell v-if="as.refundNo" title="退款单号" :value="as.refundNo" />
+        <van-cell v-if="as.refundStatus" title="退款状态">
+          <template #value>
+            <span :class="{ 'refund-failed': as.refundStatus === 3 }">{{ as.refundStatusText }}</span>
+          </template>
+        </van-cell>
         <van-cell title="申请原因" :value="as.reason" />
         <van-cell v-if="as.description" title="补充说明" :value="as.description" />
       </van-cell-group>

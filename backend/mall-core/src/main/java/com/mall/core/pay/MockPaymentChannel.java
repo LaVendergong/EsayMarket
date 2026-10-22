@@ -45,6 +45,29 @@ public class MockPaymentChannel implements PaymentChannel {
         return PayModels.CreateResult.builder().payParams(params).build();
     }
 
+    /**
+     * 模拟退款：直接成功。
+     *
+     * <p>仍然走完整的「售后 -> 支付模块 -> 渠道」链路，所以状态机、幂等（同一 refundNo 只记一次）
+     * 这些逻辑在本地就能验到；换成真实渠道时只是最后一个实现类不同。
+     */
+    @Override
+    public PayModels.RefundResult refund(PayModels.RefundCommand command) {
+        if (!available()) {
+            throw new BusinessException(ResultCode.PAY_CHANNEL_UNAVAILABLE, "模拟支付已关闭");
+        }
+        if (command.getAmount() != null && command.getTotalAmount() != null
+                && command.getAmount().compareTo(command.getTotalAmount()) > 0) {
+            throw new BusinessException(ResultCode.REFUND_FAILED, "退款金额不能大于原支付金额");
+        }
+        return PayModels.RefundResult.builder()
+                .success(true)
+                .pending(false)
+                .channelRefundNo("MOCKREFUND-" + command.getRefundNo())
+                .raw("{\"mock\":true}")
+                .build();
+    }
+
     @Override
     public PayModels.NotifyResult parseNotify(Map<String, String> params, String body, Map<String, String> headers) {
         // 模拟渠道没有真实回调；这条路径只被 mock-pay 接口用到

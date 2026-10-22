@@ -44,7 +44,9 @@ public enum ResultCode {
     PAYMENT_NOT_FOUND(4002, "支付单不存在"),
     PAYMENT_STATUS_ERROR(4003, "当前支付状态不允许该操作"),
     PAY_AMOUNT_MISMATCH(4004, "支付金额与订单不一致"),
-    PAY_NOTIFY_INVALID(4005, "支付回调校验失败");
+    PAY_NOTIFY_INVALID(4005, "支付回调校验失败"),
+    REFUND_FAILED(4006, "渠道退款失败"),
+    REFUND_NOT_SUPPORTED(4007, "原支付渠道不支持自动退款");
 
     private final int code;
     private final String message;

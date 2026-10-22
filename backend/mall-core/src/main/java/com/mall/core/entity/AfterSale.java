@@ -47,4 +47,18 @@ public class AfterSale extends BaseEntity {
     private LocalDateTime handleTime;
 
     private String handleRemark;
+
+    /** 商户退款单号：由售后单号派生，渠道按它做幂等（重试不会重复退钱） */
+    private String refundNo;
+
+    /** 原支付渠道：MOCK / ALIPAY_WAP / WECHAT_NATIVE */
+    private String refundChannel;
+
+    /** 0 未退款 1 退款中 2 退款成功 3 退款失败，见 RefundStatus */
+    private Integer refundStatus;
+
+    private LocalDateTime refundTime;
+
+    /** 渠道返回的失败原因，给客服看 */
+    private String refundError;
 }

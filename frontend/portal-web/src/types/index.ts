@@ -183,6 +183,13 @@ export interface AfterSaleVO {
   applyTime?: string
   handleTime?: string
   handleRemark?: string
+  /** 退款执行情况（和售后单状态分开看：同意≠钱到账） */
+  refundNo?: string
+  refundChannel?: string
+  refundStatus?: number
+  refundStatusText?: string
+  refundTime?: string
+  refundError?: string
   items?: OrderItemVO[]
 }
 
