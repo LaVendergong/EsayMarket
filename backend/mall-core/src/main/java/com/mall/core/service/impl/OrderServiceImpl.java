@@ -40,6 +40,7 @@ import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -166,7 +167,12 @@ public class OrderServiceImpl implements OrderService {
     private OrderCreateVO placeOrder(Long userId, String requestId, Address address, List<OrderLine> lines) {
         List<OrderItem> items = new ArrayList<>(lines.size());
         BigDecimal total = BigDecimal.ZERO;
-        for (OrderLine line : lines) {
+        // 按 SKU 升序加锁：多个事务锁同一批 SKU 时加锁顺序一致，能显著减少死锁
+        // （死锁本身的兜底是 DeadlockRetry，见 OrderController）
+        List<OrderLine> ordered = lines.stream()
+                .sorted(Comparator.comparing(OrderLine::skuId))
+                .toList();
+        for (OrderLine line : ordered) {
             Product p = productMapper.selectById(line.productId());
             if (p == null) {
                 throw new BusinessException(ResultCode.PRODUCT_NOT_FOUND);

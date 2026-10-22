@@ -154,6 +154,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/after-sale-verify.ps
 # 支付链路（39 项断言：支付单/渠道/幂等/回调验签/查单兜底/越权；会自己停/起后端）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/payment-verify.ps1
 
+# 压测基线（14 项断言：读 / 抢库存 / 支付；会自建商品与买家，跑完自动清理）
+node scripts/load-test.mjs
+
 # HTTPS 落地验证（18 项断言：自签 CA + nginx TLS；需要 WSL 里装 nginx，会临时起 18443 端口）
 wsl -u root -e bash /mnt/d/projects/mall/scripts/https-verify.sh
 

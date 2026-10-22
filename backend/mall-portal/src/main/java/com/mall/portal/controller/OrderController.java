@@ -9,6 +9,7 @@ import com.mall.core.model.vo.OrderVO;
 import com.mall.core.security.UserContext;
 import com.mall.core.service.OrderService;
 import com.mall.core.service.PaymentService;
+import com.mall.core.tx.DeadlockRetry;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
@@ -32,13 +33,16 @@ public class OrderController {
     @Operation(summary = "结算购物车选中项下单（addressId 不传用默认地址）")
     @PostMapping
     public R<OrderCreateVO> create(@RequestBody(required = false) CreateOrderDTO dto) {
-        return R.ok(orderService.create(UserContext.requireUserId(), dto));
+        Long userId = UserContext.requireUserId();
+        // 高并发下 MySQL 会主动 kill 死锁的事务，重试是标准做法（下单本身靠 requestId 幂等）
+        return R.ok(DeadlockRetry.run(() -> orderService.create(userId, dto)));
     }
 
     @Operation(summary = "「立即购买」直连下单（指定 SKU + 数量，不经过购物车）")
     @PostMapping("/direct")
     public R<OrderCreateVO> createDirect(@RequestBody CreateDirectOrderDTO dto) {
-        return R.ok(orderService.createDirect(UserContext.requireUserId(), dto));
+        Long userId = UserContext.requireUserId();
+        return R.ok(DeadlockRetry.run(() -> orderService.createDirect(userId, dto)));
     }
 
     @Operation(summary = "我的订单分页（status 可选）")
@@ -65,7 +69,11 @@ public class OrderController {
     @Operation(summary = "快捷支付（模拟渠道，适合本地与自动化测试）")
     @PostMapping("/{id}/pay")
     public R<Void> pay(@PathVariable Long id) {
-        paymentService.payWithMock(UserContext.requireUserId(), id);
+        Long userId = UserContext.requireUserId();
+        DeadlockRetry.run(() -> {
+            paymentService.payWithMock(userId, id);
+            return null;
+        });
         return R.ok();
     }
 
