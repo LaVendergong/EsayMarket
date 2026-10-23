@@ -14,6 +14,7 @@ import com.mall.core.model.vo.LoginVO;
 import com.mall.core.model.vo.UserVO;
 import com.mall.core.security.JwtProperties;
 import com.mall.core.security.LoginThrottle;
+import com.mall.core.service.AdminPermissionService;
 import com.mall.core.service.UserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -21,6 +22,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +38,7 @@ public class UserServiceImpl implements UserService {
     private final PasswordEncoder passwordEncoder;
     private final JwtProperties jwtProperties;
     private final LoginThrottle loginThrottle;
+    private final AdminPermissionService adminPermissionService;
 
     @Override
     public Long register(RegisterDTO dto) {
@@ -83,6 +86,11 @@ public class UserServiceImpl implements UserService {
         loginThrottle.reset(dto.getUsername());
         Map<String, Object> claims = new HashMap<>();
         claims.put("role", user.getRole() == null ? 0 : user.getRole());
+        // 租户写进 token：后台后续请求一律以它为准，请求头改不动
+        // 只有后台账号才把租户写进 token；买家 tenant_id=0，写进去会被当成「平台方」而绕过全部过滤
+        if (user.getRole() != null && user.getRole() == 1) {
+            claims.put("tenantId", user.getTenantId() == null ? 0L : user.getTenantId());
+        }
         claims.put("username", user.getUsername());
         String token = JwtUtil.create(jwtProperties.getSecret(), jwtProperties.getAccessExpireMillis(),
                 claims, String.valueOf(user.getId()));
@@ -102,10 +110,25 @@ public class UserServiceImpl implements UserService {
         }
         Map<String, Object> claims = new HashMap<>();
         claims.put("role", user.getRole() == null ? 0 : user.getRole());
+        // 租户写进 token：后台后续请求一律以它为准，请求头改不动
+        // 只有后台账号才把租户写进 token；买家 tenant_id=0，写进去会被当成「平台方」而绕过全部过滤
+        if (user.getRole() != null && user.getRole() == 1) {
+            claims.put("tenantId", user.getTenantId() == null ? 0L : user.getTenantId());
+        }
         claims.put("username", user.getUsername());
         String token = JwtUtil.create(jwtProperties.getSecret(), jwtProperties.getAccessExpireMillis(),
                 claims, String.valueOf(user.getId()));
         return toLoginVO(user, token);
+    }
+
+    @Override
+    public LoginVO profile(Long userId) {
+        User user = userMapper.selectById(userId);
+        if (user == null) {
+            throw new BusinessException(ResultCode.USER_NOT_FOUND);
+        }
+        // token 传 null：只是回显资料与权限，不签发新凭证
+        return toLoginVO(user, null);
     }
 
     private LoginVO toLoginVO(User user, String token) {
@@ -116,6 +139,12 @@ public class UserServiceImpl implements UserService {
         vo.setNickname(user.getNickname());
         vo.setAvatar(user.getAvatar());
         vo.setRole(user.getRole());
+        vo.setTenantId(user.getTenantId() == null ? 0L : user.getTenantId());
+        // 只有后台账号才需要权限码：前台用户不走 RBAC，别为每次登录都查三张关联表
+        if (user.getRole() != null && user.getRole() == 1) {
+            vo.setRoles(adminPermissionService.roleCodesOf(user.getId()));
+            vo.setPermissions(new ArrayList<>(adminPermissionService.codesOf(user.getId())));
+        }
         return vo;
     }
 

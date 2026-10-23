@@ -4,7 +4,7 @@
 #
 # 这套检查回答的是「部署出来到底对不对」，和单元测试/接口测试是不同维度：
 #   A) 5 个容器都起来了，mysql 健康
-#   B) initdb 的 V1..V13 迁移真的执行了（新库、空数据卷）
+#   B) initdb 的 V1..V24 迁移真的执行了（新库、空数据卷）
 #   C) prod profile 真的生效：接口文档关闭、actuator 只留 health+prometheus
 #   D) prod 下的 Cookie 是 Secure + HttpOnly + SameSite
 #   E) nginx 容器真的在服务构建产物，并且 /api 反代到后端

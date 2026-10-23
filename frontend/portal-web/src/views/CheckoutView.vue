@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { showSuccessToast, showToast } from 'vant'
 import { addressApi, cartApi, orderApi, productApi } from '@/api'
 import { cart } from '@/stores/cart'
-import type { AddressVO, CartVO } from '@/types'
+import type { AddressVO, CartVO, OrderPreviewVO } from '@/types'
 import { money } from '@/utils/format'
 
 const route = useRoute()
@@ -49,14 +49,40 @@ const submitting = ref(false)
 /** 页面数据（地址 + 清单）加载中：这期间不让点提交 */
 const loading = ref(true)
 
+/**
+ * 服务端计价结果。金额一律以它为准（含运费与券），前端只展示。
+ * 拿不到（比如后端刚上线还没这张券）时回退到本地累加，至少别让页面空着。
+ */
+const preview = ref<OrderPreviewVO | null>(null)
+/** 选中的「用户券 id」；undefined = 不用券 */
+const userCouponId = ref<number | undefined>(undefined)
+const couponVisible = ref(false)
+
 const selected = computed(() => addresses.value.find((a) => a.id === addressId.value))
-const total = computed(() => items.value.reduce((s, c) => s + Number(c.totalPrice || 0), 0))
+const localTotal = computed(() => items.value.reduce((s, c) => s + Number(c.totalPrice || 0), 0))
+const goodsAmount = computed(() => preview.value?.goodsAmount ?? localTotal.value)
+const freightAmount = computed(() => preview.value?.freightAmount ?? 0)
+const discountAmount = computed(() => preview.value?.discountAmount ?? 0)
+const payAmount = computed(() => preview.value?.payAmount ?? localTotal.value)
+
+/** 虚拟订单：没有收货地址、没有运费，支付后自动发放 */
+const isVirtual = computed(() => preview.value?.orderType === 2)
+
+const coupons = computed(() => preview.value?.coupons ?? [])
+const usableCoupons = computed(() => coupons.value.filter((c) => c.usable))
+const selectedCoupon = computed(() => coupons.value.find((c) => c.id === userCouponId.value))
+const couponText = computed(() => {
+  if (selectedCoupon.value) return `-${money(discountAmount.value)}`
+  return usableCoupons.value.length ? `${usableCoupons.value.length} 张可用` : '无可用'
+})
+
 const fullAddress = (a: AddressVO) => [a.province, a.city, a.district, a.detail].filter(Boolean).join('')
 
 async function load() {
   loading.value = true
   try {
     await loadData()
+    await loadPreview()
   } finally {
     loading.value = false
   }
@@ -95,13 +121,33 @@ async function loadData() {
   items.value = cartList.filter((c) => c.valid && c.checked === 1)
 }
 
+/** 试算：运费/优惠/可用券都由服务端算，前端不自己加减 */
+async function loadPreview() {
+  try {
+    preview.value = await orderApi.preview({
+      skuId: direct.value?.skuId,
+      quantity: direct.value?.quantity,
+      userCouponId: userCouponId.value
+    })
+  } catch {
+    preview.value = null
+  }
+}
+
+async function chooseCoupon(id?: number) {
+  userCouponId.value = id
+  couponVisible.value = false
+  await loadPreview()
+}
+
 function choose(id: number) {
   addressId.value = id
   pickerVisible.value = false
 }
 
 async function submit() {
-  if (!addressId.value) {
+  // 虚拟订单不需要地址（后端也不会解析），别用地址把用户挡在下单前
+  if (!isVirtual.value && !addressId.value) {
     showToast('请先选择收货地址')
     return
   }
@@ -112,9 +158,11 @@ async function submit() {
   submitting.value = true
   try {
     const d = direct.value
+    // 虚拟订单传 undefined 地址：后端本来也不会用
+    const addr = isVirtual.value ? undefined : addressId.value
     const vo = d
-      ? await orderApi.createDirect(d.skuId, d.quantity, addressId.value, requestId.value)
-      : await orderApi.create(addressId.value, requestId.value)
+      ? await orderApi.createDirect(d.skuId, d.quantity, addr, requestId.value, userCouponId.value)
+      : await orderApi.create(addr, requestId.value, userCouponId.value)
     // 直连下单没动购物车，没必要刷角标
     if (!isDirect.value) await cart.refresh()
     showSuccessToast('下单成功')
@@ -134,7 +182,11 @@ onMounted(load)
   <div class="app-shell pb-submit">
     <van-nav-bar title="确认订单" left-arrow @click-left="router.back()" />
 
-    <van-cell-group inset class="block">
+    <van-cell-group v-if="isVirtual" inset class="block">
+      <van-cell title="虚拟商品" label="无需收货地址，支付成功后自动发放，可在「我的卡券」查看" />
+    </van-cell-group>
+
+    <van-cell-group v-else inset class="block">
       <van-cell v-if="selected" is-link @click="pickerVisible = true">
         <template #title>
           <div class="receiver">
@@ -164,15 +216,22 @@ onMounted(load)
     </van-cell-group>
 
     <van-cell-group inset class="block">
-      <van-cell title="商品金额" :value="money(total)" />
-      <van-cell title="运费" value="¥0.00" />
-      <van-cell title="应付金额" :value="money(total)" class="payable" />
+      <van-cell title="商品金额" :value="money(goodsAmount)" />
+      <van-cell title="运费" :value="money(freightAmount)" />
+      <van-cell title="优惠券" is-link :value="couponText" @click="couponVisible = true" />
+      <van-cell
+        v-if="discountAmount > 0"
+        title="优惠"
+        :value="`-${money(discountAmount)}`"
+        class="discount"
+      />
+      <van-cell title="应付金额" :value="money(payAmount)" class="payable" />
     </van-cell-group>
 
     <!-- loading 期间禁用：清单还没到就点提交，submit() 只会弹「没有待结算的商品」，
          白让用户以为下单失败（这个状态在慢网络下真的会出现） -->
     <van-submit-bar
-      :price="Math.round(total * 100)"
+      :price="Math.round(payAmount * 100)"
       button-text="提交订单"
       :loading="submitting"
       :disabled="loading"
@@ -195,6 +254,28 @@ onMounted(load)
         <van-button round block type="danger" plain @click="router.push('/address/new')">新增地址</van-button>
       </div>
     </van-popup>
+
+    <van-popup v-model:show="couponVisible" position="bottom" round>
+      <div class="pick-head">选择优惠券</div>
+      <van-cell title="不使用优惠券" clickable @click="chooseCoupon(undefined)" />
+      <van-cell
+        v-for="c in coupons"
+        :key="c.id"
+        :title="c.name"
+        :label="`满 ${c.threshold} 可用${c.usable ? '' : '（未达门槛）'}`"
+        :class="{ 'coupon-off': !c.usable }"
+        clickable
+        @click="c.usable && chooseCoupon(c.id)"
+      >
+        <template #value>
+          <span class="coupon-amount">-{{ money(c.amount) }}</span>
+        </template>
+      </van-cell>
+      <van-empty v-if="!coupons.length" description="没有可用的券" />
+      <div class="pick-foot">
+        <van-button round block type="danger" plain @click="router.push('/coupon')">去领券中心</van-button>
+      </div>
+    </van-popup>
   </div>
 </template>
 
@@ -215,6 +296,19 @@ onMounted(load)
 }
 
 .payable :deep(.van-cell__value) {
+  color: #ee0a24;
+  font-weight: 600;
+}
+
+.discount :deep(.van-cell__value) {
+  color: #ee0a24;
+}
+
+.coupon-off {
+  opacity: 0.5;
+}
+
+.coupon-amount {
   color: #ee0a24;
   font-weight: 600;
 }

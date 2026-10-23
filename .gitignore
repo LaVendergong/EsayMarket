@@ -16,6 +16,8 @@ node_modules/
 logs/
 tmp/
 *.log
+# 评价晒图等用户上传的文件（默认 MALL_UPLOAD_DIR=./uploads）
+uploads/
 
 # ============================================================
 # IDE / 编辑器

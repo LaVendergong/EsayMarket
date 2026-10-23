@@ -15,6 +15,9 @@ public interface UserService {
     /** 用刷新令牌换一个新的 access token（账号被禁用/删除时抛业务异常） */
     LoginVO refreshLogin(Long userId);
 
+    /** 当前登录人的资料（含角色与权限码，token 为空）：前端刷新菜单用 */
+    LoginVO profile(Long userId);
+
     UserVO getById(Long userId);
 
     PageResult<UserVO> page(long pageNum, long pageSize, String keyword);

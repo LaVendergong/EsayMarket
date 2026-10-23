@@ -14,4 +14,7 @@ public class CreateOrderDTO {
      * 不传则退化为普通下单（仅靠购物车行锁避免并发重复）。
      */
     private String requestId;
+
+    /** 使用的用户券 id（结算页选的）；不传=不用券。金额一律由服务端重算 */
+    private Long userCouponId;
 }

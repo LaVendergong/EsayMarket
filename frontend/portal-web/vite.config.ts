@@ -42,6 +42,11 @@ export default defineConfig({
       '/img': {
         target: 'http://localhost:8090',
         changeOrigin: true
+      },
+      // 评价晒图落在后端 uploads 目录（/uploads/**）：不代理的话浏览器会去 5198 找图片，直接 404
+      '/uploads': {
+        target: 'http://localhost:8090',
+        changeOrigin: true
       }
     }
   }

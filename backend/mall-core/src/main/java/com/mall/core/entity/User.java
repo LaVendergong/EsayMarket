@@ -18,6 +18,9 @@ public class User extends BaseEntity {
 
     private String username;
 
+    /** 0 = 平台方（可跨租户）；>0 = 该商户的管理员。买家账号固定 0（买家全局） */
+    private Long tenantId;
+
     /**
      * BCrypt 哈希（不可逆）。
      *

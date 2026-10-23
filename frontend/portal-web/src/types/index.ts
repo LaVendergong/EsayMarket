@@ -53,6 +53,9 @@ export interface ProductVO {
   sales: number
   /** 该商品所有 SKU 的可售库存合计 */
   stock: number
+  /** 平均分（0 = 暂无评价） */
+  ratingAvg?: number
+  reviewCount?: number
 }
 
 export interface SkuVO {
@@ -78,7 +81,55 @@ export interface ProductDetailVO {
   price: number
   status: number
   sales: number
+  /** 运费说明，后端拼好的文案（包邮 / 运费 ¥8.00 / 满 ¥99.00 包邮 / 虚拟商品，无需物流） */
+  freightText?: string
+  /** 1 实物 2 虚拟 */
+  productType?: number
+  productTypeText?: string
+  /** 虚拟：1 卡密 2 外链 */
+  deliveryType?: number
+  deliveryTypeText?: string
+  /** 平均分（0 = 暂无评价） */
+  ratingAvg?: number
+  reviewCount?: number
   skus: SkuVO[]
+}
+
+/** 我的收藏 */
+export interface FavoriteVO {
+  id: number
+  productId: number
+  productName?: string
+  subTitle?: string
+  mainImage?: string
+  price?: number
+  /** 0 已下架：列表里要标灰，点进去会报"商品已下架" */
+  status?: number
+  stock?: number
+  favoriteTime?: string
+}
+
+/** 商品评价 */
+export interface ReviewVO {
+  id: number
+  orderId: number
+  orderItemId: number
+  productId: number
+  skuId: number
+  spec?: string
+  productName?: string
+  /** 1-5 */
+  rating: number
+  content?: string
+  /** 晒图 URL（最多 3 张） */
+  images?: string[]
+  /** 匿名评价固定显示「匿名用户」 */
+  userLabel: string
+  anonymous: number
+  status: number
+  /** 1 = 该订单已退款：评价仍展示，但不计入商品评分 */
+  refunded?: number
+  createTime?: string
 }
 
 export interface CartVO {
@@ -129,16 +180,33 @@ export interface OrderItemVO {
   price: number
   quantity: number
   totalAmount: number
+  /** 该行分摊到的优惠 */
+  discountAmount?: number
+  /** 该行实付 */
+  payAmount?: number
 }
 
 export interface OrderVO {
   id: number
   orderNo: string
   userId: number
+  /** 商品金额（不含运费、不含优惠） */
   totalAmount: number
+  freightAmount?: number
+  discountAmount?: number
+  /** 应付 = 商品 + 运费 - 优惠 */
   payAmount: number
+  userCouponId?: number | null
   status: number
   statusText: string
+  /** 1 实物 2 虚拟（虚拟订单没有收货地址，支付后自动发放） */
+  orderType?: number
+  orderTypeText?: string
+  /** 物流：发货后才有值 */
+  shipCompany?: string
+  shipCompanyText?: string
+  shipNo?: string
+  shipTime?: string
   receiver?: string
   receiverPhone?: string
   receiverAddr?: string
@@ -234,4 +302,101 @@ export interface PaymentVO {
 export interface PayChannelOption {
   code: string
   text: string
+}
+
+// ---------------------------------------------------------------- 优惠券 / 结算试算
+/** 领券中心的券模板 */
+export interface CouponVO {
+  id: number
+  name: string
+  /** 使用门槛（商品金额，不含运费） */
+  threshold: number
+  amount: number
+  total: number
+  received: number
+  validFrom?: string
+  validTo?: string
+  /** 1 可领 0 停发 */
+  status: number
+  /** 当前用户是否已领取 */
+  receivedByMe?: boolean
+}
+
+/** 我的券（id 是「用户券」id，下单/试算要传这个，不是 couponId） */
+export interface UserCouponVO {
+  id: number
+  couponId: number
+  name: string
+  threshold: number
+  amount: number
+  /** 0 未使用 1 已使用（下单锁定/支付核销） 2 已过期 */
+  status: number
+  statusText?: string
+  orderId?: number | null
+  validFrom?: string
+  validTo?: string
+  receiveTime?: string
+  useTime?: string
+  /** 仅结算页返回：当前金额下这张券能不能用 */
+  usable?: boolean
+}
+
+export interface OrderPreviewItemVO {
+  productId: number
+  skuId: number
+  productName: string
+  image?: string
+  spec?: string
+  price: number
+  quantity: number
+  lineAmount: number
+  discountAmount: number
+  payAmount: number
+}
+
+export interface OrderPreviewVO {
+  goodsAmount: number
+  freightAmount: number
+  discountAmount: number
+  payAmount: number
+  userCouponId?: number | null
+  /** 1 实物 2 虚拟：虚拟订单不展示地址块 */
+  orderType?: number
+  orderTypeText?: string
+  items: OrderPreviewItemVO[]
+  coupons: UserCouponVO[]
+}
+
+/** 虚拟商品凭证（卡密 / 外链），列表不含明文 */
+export interface DigitalGrantVO {
+  id: number
+  orderId: number
+  orderItemId: number
+  productId: number
+  skuId: number
+  productName?: string
+  spec?: string
+  productImage?: string
+  /** 1 卡密 2 外链 */
+  deliveryType: number
+  deliveryTypeText: string
+  /** 1 已发放 2 已作废 9 发放失败 */
+  status: number
+  statusText: string
+  viewCount: number
+  grantTime?: string
+}
+
+export interface GrantContentVO {
+  deliveryType: number
+  /** 卡密类为「卡号|卡密」，外链类为 URL */
+  content: string
+  viewCount: number
+}
+
+export interface PreviewOrderDTO {
+  /** 传了就按「立即购买」算，不传用购物车已勾选项 */
+  skuId?: number
+  quantity?: number
+  userCouponId?: number
 }

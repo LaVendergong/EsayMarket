@@ -3,8 +3,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
-import { categoryApi, productApi } from '@/api'
-import type { CategoryVO, ProductDTO, SkuDTO } from '@/types'
+import { cardKeyApi, categoryApi, freightApi, productApi } from '@/api'
+import type { CategoryVO, FreightTemplateVO, ProductDTO, SkuDTO } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -16,6 +16,7 @@ const id = computed(() => {
 const isEdit = computed(() => id.value !== undefined)
 
 const categories = ref<CategoryVO[]>([])
+const freights = ref<FreightTemplateVO[]>([])
 const loading = ref(false)
 const saving = ref(false)
 
@@ -29,8 +30,65 @@ const form = reactive({
   detail: '',
   price: null as number | null,
   status: 1,
+  freightTemplateId: null as number | null,
+  productType: 1,
+  deliveryType: null as number | null,
+  deliveryUrl: '',
   skus: [] as SkuDTO[]
 })
+
+/** 卡密导入：卡密类商品才有，且要先保存商品（需要 skuId） */
+const keyDialog = ref(false)
+const keySkuId = ref<number | null>(null)
+const keyText = ref('')
+const keySaving = ref(false)
+
+/** 选 CSV/文本文件：前端读完直接填进输入框，后端只保留一条导入路径（不做 multipart） */
+function onKeyFile(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = () => {
+    keyText.value = String(reader.result || '')
+    ElMessage.success(`已读取 ${file.name}`)
+  }
+  reader.readAsText(file, 'utf-8')
+  // 清空 value，否则连续选同一个文件不会触发 change
+  input.value = ''
+}
+
+function openKeyImport(skuId?: number) {
+  if (!skuId) {
+    ElMessage.warning('请先保存商品，再导入卡密')
+    return
+  }
+  keySkuId.value = skuId
+  keyText.value = ''
+  keyDialog.value = true
+}
+
+async function saveKeys() {
+  const lines = keyText.value
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (!lines.length) {
+    ElMessage.warning('请粘贴卡密，每行一张（卡号,卡密）')
+    return
+  }
+  keySaving.value = true
+  try {
+    const n = await cardKeyApi.importKeys(keySkuId.value!, lines)
+    ElMessage.success(`已导入 ${n} 张，库存同步增加 ${n}`)
+    keyDialog.value = false
+    await loadDetail()
+  } catch {
+    // 拦截器已提示
+  } finally {
+    keySaving.value = false
+  }
+}
 
 function addSku() {
   form.skus.push({ id: undefined, skuCode: '', spec: '', image: '', price: null, stock: null })
@@ -52,6 +110,10 @@ async function loadDetail() {
     form.detail = d.detail ?? ''
     form.price = d.price
     form.status = d.status
+    form.freightTemplateId = d.freightTemplateId ?? null
+    form.productType = d.productType ?? 1
+    form.deliveryType = d.deliveryType ?? null
+    form.deliveryUrl = d.deliveryUrl ?? ''
     // 带上 id 的走更新，没 id 的（新增行）后端按新增处理
     form.skus = d.skus.map((s) => ({
       id: s.id,
@@ -83,6 +145,16 @@ async function save() {
     ElMessage.warning('至少需要一个 SKU')
     return
   }
+  if (form.productType === 2) {
+    if (!form.deliveryType) {
+      ElMessage.warning('虚拟商品必须选择发放方式（卡密 / 外链）')
+      return
+    }
+    if (form.deliveryType === 2 && !form.deliveryUrl.trim()) {
+      ElMessage.warning('外链类商品必须填写下载地址')
+      return
+    }
+  }
   for (const [i, s] of form.skus.entries()) {
     if (s.price === null || s.price === undefined) {
       ElMessage.warning(`第 ${i + 1} 个 SKU 价格不能为空`)
@@ -103,6 +175,11 @@ async function save() {
     detail: form.detail || undefined,
     price: form.price,
     status: form.status,
+    productType: form.productType,
+    deliveryType: form.productType === 2 ? form.deliveryType : undefined,
+    deliveryUrl: form.productType === 2 && form.deliveryType === 2 ? form.deliveryUrl.trim() : undefined,
+    // 虚拟商品不收运费，别把下拉里残留的模板传上去
+    freightTemplateId: form.productType === 1 ? form.freightTemplateId ?? undefined : undefined,
     skus: form.skus.map<SkuDTO>((s) => ({
       id: s.id,
       skuCode: s.skuCode || undefined,
@@ -131,6 +208,8 @@ async function save() {
 
 onMounted(async () => {
   categories.value = await categoryApi.tree()
+  // 停用的模板也要列出来：商品可能还绑着它（计价时按包邮处理），编辑时不该凭空消失
+  freights.value = await freightApi.list()
   await loadDetail()
 })
 </script>
@@ -143,6 +222,21 @@ onMounted(async () => {
       </template>
 
       <el-form :model="form" label-width="100px">
+        <el-form-item label="商品类型" required>
+          <el-radio-group v-model="form.productType">
+            <el-radio :value="1">实物（要地址、要运费）</el-radio>
+            <el-radio :value="2">虚拟（支付后自动发放）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="form.productType === 2" label="发放方式" required>
+          <el-radio-group v-model="form.deliveryType">
+            <el-radio :value="1">卡密（从卡密池发放）</el-radio>
+            <el-radio :value="2">外链（下载地址）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="form.productType === 2 && form.deliveryType === 2" label="下载地址" required>
+          <el-input v-model="form.deliveryUrl" maxlength="512" placeholder="https://...（付款后才会展示给买家）" style="width: 420px" />
+        </el-form-item>
         <el-form-item label="分类" required>
           <el-tree-select
             v-model="form.categoryId"
@@ -155,6 +249,21 @@ onMounted(async () => {
             placeholder="选择分类"
             style="width: 320px"
           />
+        </el-form-item>
+        <el-form-item v-if="form.productType === 1" label="运费模板">
+          <el-select
+            v-model="form.freightTemplateId"
+            clearable
+            placeholder="不选 = 包邮"
+            style="width: 320px"
+          >
+            <el-option
+              v-for="f in freights"
+              :key="f.id"
+              :label="f.status === 1 ? f.name : `${f.name}（已停用，按包邮）`"
+              :value="f.id"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="商品名称" required>
           <el-input v-model="form.name" maxlength="128" placeholder="商品名称" style="width: 420px" />
@@ -235,8 +344,16 @@ onMounted(async () => {
             <el-input-number v-model="row.stock" :min="0" :step="1" controls-position="right" style="width: 100%" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90">
-          <template #default="{ $index }">
+        <el-table-column label="操作" :width="form.productType === 2 && form.deliveryType === 1 ? 170 : 90">
+          <template #default="{ row, $index }">
+            <el-button
+              v-if="form.productType === 2 && form.deliveryType === 1"
+              link
+              type="primary"
+              @click="openKeyImport(row.id)"
+            >
+              导入卡密
+            </el-button>
             <el-button link type="danger" @click="form.skus.splice($index, 1)">删除</el-button>
           </template>
         </el-table-column>
@@ -247,6 +364,30 @@ onMounted(async () => {
       <el-button @click="router.push('/product')">取消</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
     </div>
+
+    <el-dialog v-model="keyDialog" title="导入卡密" width="520px">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="每行一张，格式「卡号,卡密」（逗号或 Tab 分隔）。导入多少张，SKU 库存就自动加多少。"
+        class="key-tip"
+      />
+      <!-- 不搞 multipart 上传：文件在前端读成文本塞进同一个输入框，后端只有一条导入路径 -->
+      <div class="key-file">
+        <input ref="keyFileInput" type="file" accept=".csv,.txt" @change="onKeyFile" />
+      </div>
+      <el-input
+        v-model="keyText"
+        type="textarea"
+        :rows="10"
+        placeholder="CARD001,SECRET001&#10;CARD002,SECRET002"
+      />
+      <template #footer>
+        <el-button @click="keyDialog = false">取消</el-button>
+        <el-button type="primary" :loading="keySaving" @click="saveKeys">导入</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -278,5 +419,9 @@ onMounted(async () => {
   justify-content: flex-end;
   gap: 12px;
   margin-top: 16px;
+}
+
+.key-tip {
+  margin-bottom: 12px;
 }
 </style>

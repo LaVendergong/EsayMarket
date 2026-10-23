@@ -133,7 +133,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/token-lifecycle-veri
 # 容器版前端已经是 https（自签证书，由 scripts/gen-certs.sh 生成；浏览器会有证书警告）
 # 起容器版（内存不足会先拦下；起完自动检查 Windows 能否打开页面，转发断了会自愈）
 powershell -ExecutionPolicy Bypass -File scripts/deploy-up.ps1
-# 停容器版并释放内存（-Purge 连数据卷一起删，下次启动会重跑 V1..V13）
+# 停容器版并释放内存（-Purge 连数据卷一起删，下次启动会重跑 V1..V24）
 powershell -ExecutionPolicy Bypass -File scripts/deploy-down.ps1
 # 部署验证（54 项：容器栈上跑，含迁移顺序 / 中文 / 资金链路 / 构建产物 / https+HSTS+301）
 bash scripts/deploy-verify.sh
@@ -248,7 +248,7 @@ prod 下的行为差异：
 > 这个自检是必需的：Spring Boot 在 `@ConfigurationProperties` 绑定路径上会把解析不了的占位符
 > **原样保留而不是报错**，只靠 YAML 写 `${MALL_JWT_SECRET}` 拦不住（详见 `docs/AI-HANDOFF.md` §8 第 26 条）。
 
-CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V13、两个前端 typecheck+build。
+CI 见 `.github/workflows/ci.yml`：后端编译+单测、在全新 MySQL 上按顺序应用 V1..V25、两个前端 typecheck+build。
 
 ## 几个必须知道的坑
 

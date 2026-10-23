@@ -81,7 +81,8 @@ async function handleDiff(row: { id: number }, action: 'CONFIRM' | 'IGNORE') {
       action === 'CONFIRM' ? '标记已处理' : '忽略差异',
       { confirmButtonText: '确定', cancelButtonText: '取消', inputPlaceholder: '处理说明（会记入审计）' }
     )
-    remark = result.value || ''
+    // prompt 的返回值在 box.value 上；result 是本页的批次数据（以前误赋给 remark，导致说明永远是空）
+    remark = box.value || ''
   } catch {
     return
   }

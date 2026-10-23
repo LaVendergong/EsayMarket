@@ -24,6 +24,7 @@ public class OrderMetrics {
 
     private final Counter created;
     private final Counter stockShortage;
+    private final Counter cardKeyMismatch;
 
     public OrderMetrics(MeterRegistry registry) {
         this.created = Counter.builder("mall.orders.created")
@@ -31,6 +32,9 @@ public class OrderMetrics {
                 .register(registry);
         this.stockShortage = Counter.builder("mall.orders.stock_shortage")
                 .description("因库存不足被回滚的下单次数")
+                .register(registry);
+        this.cardKeyMismatch = Counter.builder("mall.cardkey.stock_mismatch")
+                .description("卡密池可用数与可售库存不一致的 SKU 次数（每次对账按 SKU 累加）")
                 .register(registry);
     }
 
@@ -42,5 +46,12 @@ public class OrderMetrics {
     /** 条件 UPDATE 锁库存失败 → 整单回滚 */
     public void stockShortage() {
         stockShortage.increment();
+    }
+
+    /** 卡密对账发现不一致的 SKU（有多少个就加多少次） */
+    public void cardKeyMismatch(int skus) {
+        if (skus > 0) {
+            cardKeyMismatch.increment(skus);
+        }
     }
 }

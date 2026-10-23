@@ -41,6 +41,11 @@ mall:
       enabled: ${MALL_ORDER_TIMEOUT_JOB_ENABLED:true}
       # 扫描间隔：开发环境 10 秒便于验证，生产建议调大（如 60000）
       interval-millis: ${MALL_ORDER_TIMEOUT_JOB_INTERVAL_MILLIS:10000}
+  coupon:
+    expire-job:
+      # 过期券状态纠正（0 未使用 → 2 已过期），与 portal 一样默认开
+      enabled: ${MALL_COUPON_EXPIRE_JOB_ENABLED:true}
+      interval-millis: ${MALL_COUPON_EXPIRE_JOB_INTERVAL_MILLIS:3600000}
   cors:
     # 允许跨域的来源（逗号分隔）。生产用环境变量覆盖成真实域名，**绝不能写 "*"**
     #（本项目开着 allowCredentials，通配来源 + 携带凭证 = 任意站点都能拿用户身份调后端）

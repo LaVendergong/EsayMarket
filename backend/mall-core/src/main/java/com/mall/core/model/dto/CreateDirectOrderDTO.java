@@ -19,4 +19,7 @@ public class CreateDirectOrderDTO {
 
     /** 下单幂等键，含义与用法同 {@link CreateOrderDTO#getRequestId()} */
     private String requestId;
+
+    /** 使用的用户券 id（结算页选的）；不传=不用券。金额一律由服务端重算 */
+    private Long userCouponId;
 }

@@ -122,8 +122,8 @@ D:\projects\mall\
 │   ├── gen-certs.sh              生成容器栈用的自签 CA + 服务器证书（SAN: localhost）
 │   ├── load-test.mjs             压测基线（14 项断言：读/抢库存/支付 + 不超卖 + 延迟阈值）
 │   ├── cdp.mjs                   前端检查的公用 CDP 驱动（起无头 Chrome / 求值 / 点击 / 填表 / 抓告警）
-│   ├── web-check.mjs             前端「页面渲染」检查（15 项断言 + 控制台告警零容忍）
-│   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，29 项断言）
+│   ├── web-check.mjs             前端「页面渲染」检查（19 项断言 + 控制台告警零容忍）
+│   └── web-flow.mjs              前端「全流程」检查（真点按钮跑完整购物闭环，77 项断言）
 ├── logs\                    admin.log / portal.log / *.pid / *.err.log
 ├── tmp\                     临时验证产物（tmp\p2\ / tmp\p3\ / tmp\p5\ 是阶段证据，tmp\p3fix\ 与 tmp\admin-web\ 是补做验证，tmp\web\ 是前端渲染检查报告）
 └── docs\                    本文档
@@ -486,7 +486,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "D:\projects\mall\tmp\p3fix\
 **H5 的一处已知取舍（已在 P6 修掉）**：原先「立即购买」只能靠「先把该 SKU 加购 → 再把购物车其它条目取消选中 → 跳结算」
 绕出来，**会覆盖用户原有的勾选**。P6 新增了 `POST /api/v1/portal/order/direct` 直连下单入口，见下方「P1 立即购买」。
 
-### 前端真实渲染检查（`scripts\web-check.mjs`，14/14 + 0 告警）
+### 前端真实渲染检查（`scripts\web-check.mjs`，19/19 + 0 告警）
 
 ⚠️ **`pnpm build` 和 `vue-tsc` 对前端的覆盖面很有限**——实测有 3 个 bug 它们全绿，只有真渲染才发现（见 §8 第 20~22 条）。
 所以补了这个脚本：用本机 Chrome 的 DevTools Protocol 打开真实页面、必要时注入登录态、断言页面渲染出的文字，
@@ -497,11 +497,12 @@ node scripts\web-check.mjs        # 需要：两个前端 dev server + 两个后
 # 报告：tmp\web\cdp-report.txt
 ```
 
-覆盖：管理后台（商品列表 / **商品详情** / 分类管理 / 订单管理）、H5 匿名可看（首页 / 商品详情 / 不存在的商品走兜底 / 登录页）、
-H5 登录后（购物车 / 确认订单 / 我的订单 / 收货地址 / 我的）、同路由换参数会重新加载。
-最后一次结果：**15/15 PASS，控制台告警/错误 0 条**。
+覆盖：管理后台（商品列表 / **商品详情** / 分类管理 / 订单管理 / **优惠券管理** / **运费模板** / 商品编辑页含运费下拉）、
+H5 匿名可看（首页 / 商品详情 / 不存在的商品走兜底 / 登录页）、
+H5 登录后（购物车 / 确认订单 / 我的订单 / 收货地址 / 我的 / **我的优惠券** / **我的卡券**）、同路由换参数会重新加载。
+最后一次结果：**19/19 PASS，控制台告警/错误 0 条**。
 
-### 前端全流程交互测试（`scripts\web-flow.mjs`，29/29）
+### 前端全流程交互测试（`scripts\web-flow.mjs`，77/77）
 
 `web-check.mjs` 只断言「渲染出来没有」，证明不了「点了按钮业务真的跑通」。这个脚本**真的去点**，
 把整条购物闭环跑一遍，最后再用 SQL + 接口双向核对落库状态：
@@ -1351,6 +1352,562 @@ V11 只对了支付，账单里的退款行被跳过。但退款错了更贵：*
 | 人工同步 | 后台 `POST /admin/payment/{paymentNo}/sync` | 用户打电话说"我付过钱了"，客服点一下查真实状态 |
 
 > `MOCK` 渠道的 `queryPayment` **永远返回 NOTPAY**。这不是偷懒：模拟渠道没有"渠道侧真相"，
+
+---
+
+## 计价与优惠券（`scripts\pricing-verify.ps1`，20 项全绿）
+
+**背景**：改之前 `pay_amount = 商品金额之和` —— 一分钱运费收不了、一张券发不出，
+运营侧的活动全部无法落地。这次把「商品金额 → 运费 → 优惠 → 应付」收口到服务端一处。
+
+### 三条不能破的等式
+
+```
+pay_amount        = total_amount + freight_amount - discount_amount
+Σ item.pay_amount = pay_amount - freight_amount
+Σ item.discount_amount = discount_amount        （精确到分，不允许差 1 分）
+```
+
+- `t_order.total_amount` 是**历史字段名**，含义是"商品金额"，不是应付（别照着名字用）
+- 券**只减商品金额**：`discount = min(coupon.amount, goods_amount)`，运费永远原样收
+- 前端传来的任何金额一律不看，`CreateOrderDTO` 里也刻意没有金额字段
+
+### 券的生命周期
+
+| 状态 | 含义 | 谁改的 |
+|---|---|---|
+| 0 未使用 | 领到手里 | 领取 |
+| 1 已使用 | **下单即锁定**，支付后保持 | `CouponService.lock`（条件 UPDATE 0→1） |
+| 0 未使用 | 取消 / 超时关单 / 后台关单退回 | `releaseByOrder`（条件 UPDATE 1→0，按 order_id 匹配） |
+| 2 已过期 | 券模板 `valid_to` 已过且仍未使用 | `CouponExpireTask`（每小时）+ `mine()` 查询时兜底纠正 |
+
+> 售后只支持**整单退款**：`after_sale.refund_amount` 取订单实付快照，不支持按件/部分退款。
+> 退款**不**退回券（券已视为核销）。
+> 这两条是产品明确规则，**不是漏做** —— 别"顺手"补一个按件退款（`order_item.pay_amount`
+> 目前只用于展示和对账，不是退款依据）。
+
+**"下单即锁定"而不是"支付才锁定"**：一张券在同一时刻只能被一个未支付订单占用，
+否则用户能开两个待支付单用同一张券，最后付其中一个、另一个变成少收钱的单。
+
+三处并发都靠数据库而不是"先查再改"：
+
+1. 重复领取 → `uk_user_coupon (user_id, coupon_id)` 唯一键，捕获 `DuplicateKeyException`
+2. 超发 → `UPDATE ... SET received = received + 1 WHERE received < total`，影响 0 行即回滚
+3. 一券两单 → `UPDATE ... SET status = 1 WHERE id = ? AND status = 0`，影响 0 行即报"已被使用"
+
+### 分摊（最大余数法）
+
+按行金额比例分摊，余数给"小数部分最大"的那些行，并封顶到行金额：
+
+```java
+PricingService.allocate(BigDecimal totalDiscount, List<BigDecimal> lineAmounts)
+```
+
+> 为什么较真：`100 元订单减 30，两行 60/40` 直接 `30*0.6=18、30*0.4=12` 刚好凑得上，
+> 但 `99 元减 20、三行 33/33/33` 每行 6.666… 四舍五入后合计 19.98，退款时就会差 2 分。
+
+### 接口
+
+| 端 | 方法 | 路径 | 说明 |
+|---|---|---|---|
+| portal | POST | `/portal/order/preview` | 试算，只读不锁库存；返回明细分摊 + 可用券 |
+| portal | GET | `/portal/coupon/center` | 领券中心（含 `receivedByMe`） |
+| portal | POST | `/portal/coupon/{id}/receive` | 领取，每人每券一张 |
+| portal | GET | `/portal/coupon/mine?status=` | 我的券 |
+| admin | GET/POST/PUT/DELETE | `/admin/coupon[...]` | 分页/新增/改/停发/删除（已被领过只能停发） |
+| admin | GET/POST/PUT/DELETE | `/admin/freight[...]` | 运费模板（还有商品在用不许删） |
+
+商品通过 `t_product.freight_template_id` 绑模板；**不绑 = 包邮**（历史商品不会突然开始收运费）。
+
+后台另有 `GET /admin/coupon/{id}/records`：某张券的领取明细（谁领的、用没用、用在哪一单），
+上限 500 条；用户名一次批量查出来，不在循环里 N+1。
+
+**运费不要等到结算页才出现**：`ProductDetailVO.freightText` 由后端拼好
+（「包邮」/「运费 ¥8.00」/「满 ¥99.00 包邮，未满运费 ¥8.00」），规则必须与 `PricingServiceImpl` 一致
+（模板被删/停用都按包邮），前台只负责显示。首页也加了「领券中心」入口 ——
+以前只能从「我的 → 我的优惠券」进去，新用户基本发现不了这张券。
+
+### 三个踩过的坑
+
+1. **`PricingResult.userCouponId` 必须是「用户券 id」**（`t_user_coupon.id`），不是券模板 id。
+   第一版回填了模板 id，下单去 `update t_user_coupon` 时锁不到（7002）。
+   首个测试用户恰好 `user_coupon.id == coupon.id == 1`，所以"意外通过"；换第二个用户立刻暴露。
+   回归断言在 `PricingServiceTest#coupon_discountAppliesAndIsAllocated`（用户券 id=5 / 模板 id=7）。
+2. **种子脚本不要重置 `received`**（`sql/V15__coupon_seed.sql` 的 `ON DUPLICATE KEY UPDATE` 故意不写它）。
+   重置会和 `t_user_coupon` 实际条数脱钩，条件 UPDATE 就会放行超发。
+3. **Windows PowerShell 5.1 会把 UTF-8 响应解成 Latin-1，还会剥掉 `-d '{...}'` 的引号**。
+   所以 `pricing-verify.ps1` 全程用 `curl.exe` + 请求/响应文件，不用 `Invoke-RestMethod`。
+
+### 验证
+
+```powershell
+# 前置：mysql 已跑到 V15、两个应用已启动
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pricing-verify.ps1
+# 证据：tmp\pricing\*.json
+```
+
+覆盖：领券 → 重复领被拒(7005) → 试算 399+8=407 → 用券 387 → 下单 → 券锁定(0→1)
+→ 明细分摊合计=20 且 item 实付+运费=订单应付 → 取消 → 券退回(1→0)
+→ 后台建券/停发/删除保护 → 运费模板删除保护 → 商品改绑模板 → 未知模板被拒(7006)
+→ 券模板有效期改到过去后「我的券」变已过期、试算拒绝(7002)、有效期可清空。
+
+接口层之外，**UI 层**也要有回归（否则改坏结算页时接口测试发现不了）：
+`scripts\web-flow.mjs` 里新增了一段真点按钮的链路 —— 领券中心点「领取」→ 按钮变「已领取」
+→ 结算页显示运费 ¥8.00、应付 ¥208.00 → 点「优惠券」选券 → 应付变 ¥188.00、出现「优惠 -¥20.00」
+→ 下单后落库快照 `200.00,8.00,20.00,188.00`、明细分摊 `20.00/180.00`、`t_user_coupon.status=1`。
+测试用的运费模板与券都由脚本自己创建、自己清理（不依赖种子数据），可反复执行。
+
+---
+
+## 虚拟商品（卡密 / 外链），`scripts\digital-verify.ps1` 26/26
+
+**一句话**：没有物流的"收货"链路 —— 支付成功即发放，发完直接算完成，售后只可能退钱（不可能退货）。
+
+### 产品边界（已拍板，别自作主张改）
+
+| 决策 | 结论 |
+|---|---|
+| 实物 + 虚拟混着下单 | **禁止**（运费/发货时机/售后规则完全不同，一单讲不清） |
+| 虚拟订单什么时候算完成 | 发放后**立即**已完成，不加"确认收货"这一步 |
+| 库存口径 | 卡密池即库存：导入 N 张 → `sku.stock += N`，下单走原有 `lockStock` |
+| 电子资料怎么存 | **只做外链 URL**，不引入对象存储 |
+| 已查看过的卡密能否退 | **不能**，只允许未查看的自助退 |
+
+### 链路
+
+```
+0 待支付 ─支付成功─→ 同一事务内发放 ─成功─→ 3 已完成
+                              └─失败─→ 停在 1 已支付（凭证记 status=9，后台可补发）
+0 待支付 ─取消/超时─→ 4 已关闭（释放锁定库存）
+3 已完成 ─申请售后─→ 5 售后中 ─同意─→ 6 已退款（凭证作废、卡密不回池）
+```
+
+- 不需要地址：`placeOrder` 里先查商品判类型，虚拟订单**跳过** `resolveAddress`
+- 不需要后台点发货：`ship()` 对虚拟订单没有意义（状态已经是 3）
+- 发放失败**不抛异常**：钱已经收了，让支付落账回滚比"发不出货"更糟。
+  失败记一条 `status=9` 的凭证，后台 `POST /admin/order/{id}/grant` 补发（只在订单仍为 1 时可用，天然防重复发卡）
+
+### 数据模型
+
+```sql
+t_product.product_type   1 实物 2 虚拟
+t_product.delivery_type  1 卡密 2 外链
+t_product.delivery_url   外链地址（付款后才展示）
+t_order.order_type       下单时快照，商品改类型不影响历史订单
+t_card_key               卡密池（卡号/卡密 AES-GCM 加密，status 0 可用 1 已售 2 作废）
+t_digital_grant          发放凭证（content 加密；view_count 是售后退不退的依据）
+```
+
+一个订单项可能有多条凭证（买 3 张卡 = 3 条），所以 `t_digital_grant` **不能**建 `order_item_id` 唯一键。
+
+### 安全
+
+- 列表接口**不返回内容**：卡密一旦进列表响应就会进日志、进抓包、进浏览器缓存。要明文必须调 `reveal`
+- `reveal` 每次 `view_count + 1`（`UPDATE ... SET view_count = view_count + 1`，不是读-加-写）
+- 凭证不属于当前用户时统一返回「不存在」，避免枚举别人的 id
+- 退款作废卡密 **不回池**（`status=2`）：同一张卡被卖两次是最严重的事故
+
+### 接口
+
+| 端 | 方法 | 路径 | 说明 |
+|---|---|---|---|
+| portal | GET | `/portal/digital/mine` | 我的卡券 |
+| portal | GET | `/portal/digital/order/{orderId}` | 某订单的凭证 |
+| portal | POST | `/portal/digital/{id}/reveal` | 看明文（累加查看次数） |
+| admin | POST | `/admin/card-key/import` | 导入卡密，同步加库存 |
+| admin | GET | `/admin/card-key/count?skuId=` | 池子剩余（与库存对账） |
+| admin | POST | `/admin/order/{id}/grant` | 补发 |
+
+### 验证覆盖（26 项，节选）
+
+```
+[PASS] import 2 card keys :: imported=2
+[PASS] sku stock increased by import :: stock=2
+[PASS] preview: virtual order, zero freight :: orderType=2 freight=0.00 pay=50.00
+[PASS] order placed without address :: orderId=459
+[PASS] virtual order goes straight to FINISHED(3) :: status=3
+[PASS] grant issued right after payment :: grants=1
+[PASS] grant carries no plaintext  (list response has no content field)
+[PASS] reveal returns card key :: content=CARD-A-...|SECRET-A-...
+[PASS] second reveal counts 2 :: viewCount=2
+[PASS] return-refund rejected for virtual goods :: code=400
+[PASS] refund-only rejected once revealed :: code=400
+[PASS] link grant returns the configured url :: content=https://example.com/ebook.pdf
+[PASS] mixed physical + virtual is rejected (7101)
+```
+
+### 运维
+
+- **卡密池对账**：`CardKeyReconcileTask`（每小时）+ `GET /admin/card-key/consistency`。
+  不变式是 `sku.stock - sku.locked_stock == 池子里 status=0 的卡数`。
+  不一致只**告警**（`log.error` + 指标 `mall_cardkey_stock_mismatch_total`），**不自动修数** ——
+  自动把 stock 改大/改小都会掩盖真正的原因（有人绕过接口改库？发放条件 UPDATE 没命中？）。
+- **卡密导入**：后台商品编辑页支持粘贴，也支持直接选 CSV/文本文件 ——
+  文件在**前端**用 `FileReader` 读成文本填进同一个输入框，后端只保留一条导入路径（不做 multipart）。
+- **列表可区分**：后台商品列表和订单列表都有「类型」列（实物/虚拟），避免客服对虚拟订单点「发货」。
+
+---
+
+## 分类库（`sql/V17__category_catalog.sql`）
+
+原来只有 5 条演示分类（数码/手机/笔记本、服饰/男装），库里还堆着几十条历次验证脚本留下的
+`UI分类改名xxx` / `Pay Cat xxx` / `DigiCat-xxx` —— 这些是 `deleted=0`，**会直接出现在前台分类 tab 里**。
+
+现在的结构（4 个顶级 / 12 个叶子，只做两级）：
+
+```
+数码 ─ 手机 / 笔记本 / 平板与穿戴 / 影音配件
+家用电器 ─ 厨房电器 / 生活电器
+服饰 ─ 男装 / 女装 / 鞋靴箱包
+虚拟商品 ─ 卡密充值 / 电子资料 / 软件授权
+```
+
+三条原则（改分类前先看）：
+
+1. **只做两级**。三级对演示商城没有收益，前台 `van-tabs` 也放不下。
+2. **每个叶子分类至少 1 个商品**。空分类在前台就是一个点进去什么都没有的坑。
+   现在 23 个在售商品铺满 12 个叶子；加分类时请同时补商品。
+3. **卡密类商品库存初始为 0**。卡密内容是 AES-GCM 密文，SQL 种子写不了明文，
+   必须由后台「导入卡密」写入（导入多少张加多少库存）。种子脚本硬塞明文会让应用解密直接异常。
+
+两个坑：
+
+- 种子脚本的 `ON DUPLICATE KEY UPDATE` **不能更新 `stock`**：重复执行会把运营导入卡密后的库存重置回 0，
+  与卡密池脱钩（`/admin/card-key/consistency` 会立刻报不一致）。
+- 清理历史数据时用 `id < 300` 限定范围，别写成 `id NOT IN (白名单)` —— 后者在重复执行时会把上一版补的商品删掉。
+
+验证（本地实测）：
+
+```
+分类树：4 个顶级，12 个叶子全部有商品
+在售商品：23（含 5 个下架/虚拟测试数据已清）
+父分类聚合：数码 10 / 家电 4 / 服饰 4 / 虚拟商品 5
+```
+
+---
+
+## 商品搜索（`scripts\search-verify.ps1`，9/9）
+
+**搜什么**（四路 OR，匿名可访问）：
+
+| 命中位置 | 相关度分 |
+|---|---|
+| 商品名完全相等 | 100 |
+| 商品名前缀 | 80 |
+| 商品名包含 | 60 |
+| 副标题包含 | 40 |
+| 分类名包含（子查询） | 30 |
+| 详情包含 | 10 |
+
+同分按 `sales DESC, id DESC` 兜底。
+
+- **分类名走子查询** `category_id IN (SELECT id FROM t_category WHERE ... LIKE ...)`，不 JOIN：
+  JOIN 会污染分页的 count 逻辑，而搜索只需要"分类命中"这一个布尔结果。
+- **相关度排序只能用 `last("ORDER BY CASE ...")`**：MP 的 `orderBy` 表达不了 CASE WHEN。
+  代价是关键词得自己拼进 SQL，所以 `sqlLiteral` 负责转义单引号和反斜杠。
+- **联想** `GET /portal/product/suggest`：分类名最多 3 条（前缀匹配）+ 商品名按销量；
+  前缀一条都没命中时退化成包含匹配，否则输入「手机壳」这类词什么都提示不出来；结果去重后截断到 limit。
+
+前端：输入停顿 250ms 才请求（别每敲一个字打一次接口）；回来时还要校验关键词没变，否则旧建议会盖住新输入；
+建议面板 `z-index: 100`（`van-tabs` 的 sticky 是 99，低了会被分类条压住）。
+
+### 两个真实的坑
+
+1. **LIKE 模式的转义顺序**：先拼 `%kw%` 再整体转义，会把自己加的通配符也转义成字面量，
+   SQL 变成 `LIKE '\%手机\%'` —— 搜「手机」直接返回 0 条。正确顺序是**先转义用户输入，再加两侧 `%`**
+   （见 `likeLiteral` / `prefixLiteral` / `likeEscape`）。
+2. **`last()` 里没有预编译参数**，关键词必须自己转义后再拼，且 `%`/`_` 只在该转义的地方转义
+   （等值比较时转不转都行，LIKE 模式里必须转）。
+
+性能说明：`LIKE '%kw%'` 用不上索引，当前 20 多个商品无所谓；
+数据量上万后要换 MySQL ngram 全文索引或独立搜索引擎，届时 `pageForPortal` 的搜索分支整体替换，接口不用变。
+
+---
+
+## 商品评价（`scripts\review-verify.ps1`，16/16）
+
+**产品规则（已定）**：只有「已完成」的订单能评（虚拟商品支付即完成，所以也能评）；
+一个订单项只能评一次；评价**默认直接展示**，后台只能事后隐藏（不做先审后发）。
+
+- **唯一键 `uk_order_item`** 是最后一道防线：并发重复提交靠它拦，捕获 `DuplicateKeyException` 后返回 7201；
+  service 里那次 `selectCount` 只为了给友好提示，不能当并发控制用。
+- **前端只传 `orderItemId`**：商品、订单、规格全部服务端反查。否则用户可以构造别人的订单项 id 去评价。
+- **评分冗余在商品上**（`t_product.rating_avg` / `review_count`）：
+  列表页要显示「4.8 分 128 条」，实时 `GROUP BY` 聚合不划算。提交、隐藏、恢复后各重算一次。
+- **隐藏要重算评分**：隐藏一条 1 星差评后，商品分数必须跟着变，否则列表页 4.9 和详情页内容对不上。
+- 匿名评价的 `userLabel` 固定为「匿名用户」，**绝不回退到 username 或 userId**（那等于没匿名）。
+
+| 端 | 方法 | 路径 | 说明 |
+|---|---|---|---|
+| portal | POST | `/portal/review` | 提交（订单项维度） |
+| portal | GET | `/portal/review/product/{id}` | 商品评价列表，**匿名可访问**（已加进 SecurityConfig 白名单） |
+| portal | GET | `/portal/review/order/{id}/reviewed` | 该订单已评的订单项 id |
+| admin | GET | `/admin/review/page` | 分页（可按商品/状态筛） |
+| admin | PUT | `/admin/review/{id}/status` | 隐藏/恢复 |
+
+### 评价晒图（先本机，后期换对象存储）
+
+图片**不上数据库**：`t_review.images` 只存逗号分隔的 URL（最多 3 张），文件落在 `mall.upload.dir`（默认 `./uploads`），
+由 `/uploads/**` 静态映射对外提供。
+
+```
+POST /portal/upload/image   (multipart, 字段名 file)  ->  {"data":"/uploads/202610/<uuid>.png"}
+```
+
+存储抽象只有两个方法：
+
+```java
+public interface FileStorage {
+    String saveImage(byte[] bytes, String originalName, String contentType);
+    void delete(String url);
+}
+```
+
+**换对象存储时要做的事**：新增一个 `OssFileStorage` 实现（或把 `LocalFileStorage` 换掉），
+配 `mall.upload.public-base=https://cdn.example.com`，然后删掉 `UploadWebConfig`（那时 URL 指向 CDN，不再由应用提供静态文件）。
+表结构、接口、前端都不用动 —— **前端拿到的永远是 URL，不知道文件存在哪**。
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `mall.upload.dir` | `./uploads` | 本机目录；部署时挂 volume，否则重新部署图就没了 |
+| `mall.upload.public-base` | 空 | 空 = 相对路径 `/uploads/...`；挂 CDN 时填域名 |
+| `mall.upload.max-bytes` | `2097152` | 单张 2MB（`spring.servlet.multipart` 里还有一层） |
+
+**安全**（上传是最容易被利用的入口）：
+
+- 扩展名 + MIME **双校验**，只放行 jpg/png/webp（不收 svg：能内嵌脚本；不收 gif：体积不可控）；
+- 文件名用 UUID，**不使用用户传的文件名**（防 `../../` 穿越和覆盖已有文件）；
+- 写盘前 `normalize()` 后再校验 `startsWith(root)`；
+- 提交评价时**只接受本站 `/uploads/` 地址**，否则评价区可以塞外链广告/追踪像素；
+- `uploads/` 已进 `.gitignore`。
+
+**容易被漏掉的一环：`/uploads/**` 需要转发**。前端 dev server 只代理 `/api` 和 `/img`，
+不代理 `/uploads` 的话浏览器会去 5198/5199 找图片 → 404（接口全是 200，但页面上图是破的）。
+所以两个 `vite.config.ts` 都加了 `'/uploads'` 代理；生产 nginx 同样要 `location /uploads/ { proxy_pass 后端; }`。
+
+### 三个坑
+
+1. **`GET /portal/review/product/**` 忘了进白名单**：商品详情页未登录也要能看评价，
+   漏加的话接口 401，前端表现为「评价区永远是空的」——脚本里前 4 项断言全红才暴露。
+2. **PowerShell 变量名允许 `?`**：`"$prodId?pageNum=1"` 会被解析成一个叫 `prodId?pageNum` 的变量（不存在 → 空串），
+   URL 变成 `/product/?pageNum=1`。必须写 `${prodId}?pageNum=1`。
+3. **脚本里比对中文也是坑**（同下条）：`$labels -contains '匿名用户'` 永远 false，
+   改成断言「列表里没有匿名用户注册时的昵称」这种纯 ASCII 判断。
+
+---
+
+## 物流 / 收藏 / 销售报表（`scripts\extras-verify.ps1`，22/22）
+
+### 物流
+
+之前 `ship()` 只改状态，用户和客服都查不到任何物流内容。现在发货必须带快递公司 + 运单号：
+
+| 字段 | 说明 |
+|---|---|
+| `t_order.ship_company` | 存枚举 code（`SF/ZTO/YTO/YD/JD/EMS/OTHER`），不存中文名 |
+| `t_order.ship_no` | 运单号，4-64 位字母/数字/短横线 |
+| `t_order.ship_time` | 发货时间 |
+
+- **为什么存 code 不存中文**：后台要按快递公司聚合，中文名一改历史数据就对不上；自由文本还会出现「顺丰/顺丰速运/SF」三种写法。
+- 只做单号，不接第三方轨迹（快递100 之类要付费且没有测试环境）。
+- 后台列表的「发货」按钮直接跳详情页 —— 列表里没有输入框，原来的二次确认框没法填运单号。
+
+### 收藏
+
+唯一键 `(user_id, product_id)`，取消收藏是逻辑删除。**再次收藏必须把 `deleted` 置回 0**，
+直接 insert 会撞唯一键（`FavoriteMapper.favorite` 用 `ON DUPLICATE KEY UPDATE`）。
+
+列表一次批量查商品 + 一次聚合 SKU 库存，不在循环里查。
+
+### 销售报表
+
+口径写在 `ReportMapper` 的类注释里，改之前先看：
+
+- **GMV** 只统计状态 `1,2,3,5`（已支付/已发货/已完成/售后中），按 `pay_time` 归期。
+  待支付不算（钱没到）、已关闭不算、**已退款不算**（否则退款单会虚增 GMV）；
+- **退款额** 取售后单 `APPROVED(1)` 且 `refund_time` 落在区间内的 `refund_amount`；
+- **净收入** = GMV − 退款额；
+- **热销** 按件数排，金额用 `IFNULL(oi.pay_amount, 0)`（分摊优惠后的实付，老数据可能为 NULL）；
+- **券核销率** = 区间内 `use_time` 非空的数量 / 区间内领取数量。
+
+接口：`GET /admin/report/summary|daily|top-products?days=7`，`days` 是「近 N 天含今天」。
+
+---
+
+---
+
+## 看板 / 热词 / 退款一致性（`scripts\ops-verify.ps1`，13/13）
+
+### 后台首页看板
+
+`GET /admin/dashboard/summary`：今日 GMV、今日订单、待发货、待处理售后、待补发凭证、低库存 SKU 数。
+`GET /admin/dashboard/low-stock`：可售 ≤ 阈值（`mall.stock.warn-threshold`，默认 5）的 SKU 明细。
+
+- 待发货 = `status=1 AND order_type=1`；待补发 = `status=1 AND order_type=2`（虚拟订单发放失败停在这里）；
+- 低库存按 `stock - locked_stock` 算，**不按物理库存** —— 未支付订单锁定的部分不能再卖；
+- 虚拟卡密商品库存天然为 0，会出现在低库存里，这是故意的（提醒去导入卡密）。
+- 后台 `/` 现在 redirect 到 `/dashboard`，订单列表支持 `?status=1` 从卡片直达。
+
+### 搜索热词
+
+`t_search_log(keyword, create_time)` 由搜索接口顺带写入（失败只 warn，绝不影响搜索）。
+`GET /portal/product/hot-keywords` 取近 7 天 TopN。H5 搜索框聚焦且空输入时显示「最近搜索（localStorage）+ 热门搜索（服务端）」。
+
+> 只记关键词、不记用户和结果，避免多存一份个人信息；量大了按天归档。
+
+### 退款一致性（这次修的三处数据失真）
+
+1. **退款回退销量**：`approve` 成功后 `product.sales -= quantity`（`GREATEST(...,0)` 兜底）。
+   以前只加不减，商品列表的销量会一直虚高，和报表对不上。
+2. **评价打退款标记**：`t_review.refunded = 1`，**评价仍然展示**（用户确实写过，突然消失像被删了），
+   但商品评分/评价数只统计 `status=1 AND refunded=0`。
+3. **评分重算口径**：`refreshProductRating` 的 SQL 增加了 `refunded = 0`，退款后自动把分数修正。
+
+`ops-verify.ps1` 覆盖：支付后销量 +1 → 评价 1 条 → 申请售后 → 后台同意 → 订单 6（已退款）
+→ 销量回到原值、商品评分归零、评价仍在但 `refunded=1`（前后台都能看到标记）。
+
+---
+
+---
+
+## 数据治理 / 订单导出 / 操作审计（`scripts\governance-verify.ps1`，13/13）
+
+### 数据治理
+
+- `t_search_log` 是唯一一张只增不删的表：`SearchLogCleanTask` 每天 03:30 删掉 `retain-days`（默认 90）之前的数据；
+- 后台「数据维护」页展示各表行数 + 保留策略 + 最近一次清理结果；
+- **最近清理时间记在进程内**，重启后显示为空 —— 为了这个再建一张表不值当，运维真需要就去看日志。
+
+### 订单导出
+
+`GET /admin/order/export?status=&keyword=&limit=` 直接返回 CSV：
+
+- **开头必须写 UTF-8 BOM**（`\uFEFF`），否则 Excel 打开中文是乱码；
+- 商品名用 `GROUP_CONCAT(... SEPARATOR ' | ')` 拼成一行（逗号会和 CSV 分隔符冲突，所以用 ` | `）；
+- 单元格含逗号/引号/换行时用双引号包裹、内部引号双写；
+- 上限 5000 行（`MAX_EXPORT_ROWS`），防止一次导出把内存和 Excel 一起拖死；
+- 前端用 `responseType: 'blob'` 拿二进制，若拿到的是 JSON（后端报错）会挡下来不下载。
+
+### 操作审计
+
+`t_admin_audit_log` 记「谁在什么时候对什么做了什么」：
+
+| 埋点位置 | 动作 |
+|---|---|
+| 商品编辑/上下架/删除 | `PRODUCT_UPDATE` / `PRODUCT_DELETE` |
+| 订单发货/关单/补发 | `ORDER_SHIP` / `ORDER_CLOSE` / `ORDER_GRANT` |
+| 售后同意/拒绝 | `AFTER_SALE_APPROVE` / `AFTER_SALE_REJECT` |
+| 评价隐藏/恢复 | `REVIEW_HIDE` / `REVIEW_RESTORE` |
+| 卡密导入 | `CARD_KEY_IMPORT` |
+
+- **埋点在 admin 的 Controller 层**，不在 Service：不动 Service 构造依赖，也不会因为审计写库失败把业务拖回滚（`AuditServiceImpl` 里吞异常只打 warn）；
+- 操作人取 `UserContext`，**冗余存一份用户名**（账号改名后历史记录仍可读）；
+- IP 优先取 `X-Forwarded-For` 第一段，走 nginx 时才不会记成代理地址；
+- 没有登录用户的调用（定时任务）直接跳过，不产生垃圾记录。
+
+---
+
+## 后台 RBAC（`scripts\rbac-verify.ps1`，16/16）
+
+**为什么没整体搬 ruoyi**：ruoyi 的权限是「sys_menu 菜单表 + 动态路由 + 部门数据权限 + 自研 TokenService」四件套绑在一起的。
+我们的前端是静态路由、登录链路是 HttpOnly Cookie + refresh token，硬搬要同时重写路由、布局和登录，收益却是零。
+所以只取它的**模型**：用户 → 角色 → 权限码。
+
+```
+t_admin_role          角色（code/name/built_in/status）
+t_admin_permission    权限码（product:edit / order:ship / after-sale:handle …共 24 个）
+t_admin_user_role     用户-角色
+t_admin_role_permission 角色-权限
+```
+
+**鉴权链路**：`JwtAuthFilter` 解析 token 后，若 `role=1` 就把该用户的权限码一起塞进 `SecurityContext` 的 authorities，
+接口上写 `@PreAuthorize("hasAuthority('order:ship')")`（`SecurityConfig` 加了 `@EnableMethodSecurity`）。
+
+- **超管短路**：角色 code 为 `SUPER_ADMIN` 时直接返回全部权限码，**不查关联表**——
+  以后新增权限点不用回来补一行关联数据；
+- **60 秒进程内缓存**：每个请求查三表 JOIN 太浪费；角色/权限改动调 `evictAll()`，最多 60 秒生效；
+- 权限加载失败时**只保留 ROLE_ADMIN**，让 `@PreAuthorize` 拒绝，绝不放行；
+- 权限不足由 `SecurityExceptionHandler`（在 core，不在 common）转成 `code=403`，不会掉进 500 兜底。
+
+**默认角色**：`SUPER_ADMIN`（全部）、`OPERATOR`（商品/分类/订单/售后/评价/卡密，不含券和运费）、`FINANCE`（订单查看/导出、售后处理、报表）。
+升级时现有 `malladmin` 自动绑 SUPER_ADMIN，行为不变。
+
+**几条保护**：
+- 不能修改**自己**的角色（否则最后一个超管可能把自己锁死）；
+- 内置角色不可删除、不可改标识；
+- 还有管理员在用的角色不可删除；
+- 超管的权限不可编辑（它本来就拥有全部）。
+
+**前端**：登录（和 `/admin/auth/me`）返回 `permissions`；菜单用 `auth.hasPerm()` 显隐，
+路由守卫用一张「路径 → 权限码」的映射表判断，无权限时跳到第一个有权限的页面。
+映射集中在 `stores/auth.ts`，加页面只改一处。
+
+实测：财务账号能看订单列表，访问商品列表 / 角色管理 / 发货接口全部 403；超管 24 个权限码齐全。
+
+---
+
+---
+
+## 多租户（骨架已就绪，**默认关闭**，`mall.tenant.enabled`）
+
+先说结论：**表结构和代码都齐了，但开关默认是关的**，现有功能与升级前完全一致。
+原因不是没做完，而是「券/评价/对账」这类数据的**跨店归属规则还没定**，一刀切隔离会让它们互相看不见
+（实测：平台发的券，商户带着 `tenant_id=1` 查不到，前台直接报「券已过期」）。
+
+### 已经做完的部分
+
+| 内容 | 位置 |
+|---|---|
+| `t_tenant` + 14 张业务表加 `tenant_id`（默认 1）+ 唯一键改「租户内唯一」 | `V25__multi_tenant.sql` |
+| 租户上下文（ThreadLocal，平台方 = 0） | `core/tenant/TenantContext` |
+| SQL 自动注入租户条件 | `core/tenant/MallTenantHandler` + `MybatisPlusConfig` |
+| 开关 | `mall.tenant.enabled`（默认 false） |
+| 登录带回租户（只有管理员写进 token） | `UserServiceImpl` / `LoginVO.tenantId` |
+| 前台请求头识别店铺 | `X-Tenant-Id`，缺省 1 号店 |
+
+**隔离原则**：
+- 前台（H5）靠请求头认店铺，缺省 1 号；只接受正整数（0 是平台方标识，前端不许把自己变成平台视角）；
+- 后台以 **token 里的租户为准**，改 header 无效；
+- 平台方（tenant=0）读不过滤、可跨店看，**但写入必须落到具体租户**（默认 1 号店）。
+
+### 打开之前必须先定的规则
+
+1. **平台券 / 商户券**：平台发的券商户能不能用？用户领的券绑定哪个店？—— 现在这两张表在忽略清单里；
+2. **评价**：评价挂在订单上，订单有租户，评价要不要跟着隔离？（订单详情跨店不可见，评价列表就应该是本店的）；
+3. **报表 / 对账 / 看板**：平台视角（跨店汇总）还是店铺视角（只看自己）？现在 `ReportMapper`/`DashboardMapper` 是跨店统计。
+
+### 按表打开的顺序（每开一张跑一次对应脚本）
+
+```
+1. t_category / t_product / t_sku      → pricing-verify + web-check
+2. t_order / t_order_item / t_payment  → extras-verify + web-flow
+3. t_after_sale                        → ops-verify
+4. t_review                            → review-verify
+5. t_card_key / t_digital_grant        → digital-verify
+6. t_favorite / t_cart                 → extras-verify
+最后把 mall.tenant.enabled 默认值改成 true
+```
+
+### 踩到的两个真问题（都已修，值得记住）
+
+1. **买家 token 不能带 tenantId**：买家 `t_user.tenant_id` 默认 0，如果把 0 写进 token，
+   `TenantContext` 会认为这是「平台方」→ **全表不过滤，等于所有买家都能看全平台数据**。
+   现在只有 `role=1` 的管理员才写这个 claim，filter 侧也校验 role。
+2. **平台方写入会造出「无主数据」**：平台超管建的券 `tenant_id=0`，商户带 `tenant_id=1` 查不到，
+   前台表现成「券已过期」。`getTenantId()` 里对平台方做了兜底：读不过滤、写入落 1 号店。
+
+### 数据权限（第二批，未开始）
+
+多租户是「商户之间」，数据权限是「商户内部员工之间」。等有了第二个商户、且商户开始招客服再做，
+否则没有业务场景可依。设计方向：`t_admin_user.data_scope`（ALL / SELF）+ 订单/售后查询时按 `create_by` 过滤。
+
+---
+
+### 两个坑
+
+1. **PowerShell 5.1 会把无 BOM 的 UTF-8 脚本按 ANSI 解码**，脚本里的中文字面量（商品名、断言文本）会变成乱码再发给后端/参与比较。
+   `digital-verify.ps1` 因此全用 ASCII 名字，判定也不依赖中文（`pricing-verify.ps1` 同理）。
+2. **`updateById` 不会把字段写回 NULL**：虚拟商品要把 `freight_template_id` 清空、实物转虚拟要把 `delivery_type` 清空，都得走显式 SQL 或按类型屏蔽回显（本次选了后者，见 `ProductDetailVO.from`）。
 > 如果它也说"付过了"，对账任务就会把所有待支付订单直接改成已支付 —— 那不是兜底，是白送。
 
 #### 一条铁律

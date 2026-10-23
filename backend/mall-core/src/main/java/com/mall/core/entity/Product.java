@@ -31,5 +31,23 @@ public class Product extends BaseEntity {
     /** 0-下架 1-上架 */
     private Integer status;
 
+    /** 运费模板 id；为空表示包邮（历史商品不会因为上运费而突然加价） */
+    private Long freightTemplateId;
+
+    /** 1 实物 2 虚拟（虚拟不收运费、不要地址、支付即发放） */
+    private Integer productType;
+
+    /** 虚拟商品的发放方式：1 卡密 2 外链 */
+    private Integer deliveryType;
+
+    /** 外链类商品的下载地址 */
+    private String deliveryUrl;
+
+    /** 平均分（只统计展示中的评价，评价增删/隐藏后重算） */
+    private BigDecimal ratingAvg;
+
+    /** 评价条数 */
+    private Integer reviewCount;
+
     private Integer sales;
 }

@@ -5,7 +5,9 @@ import com.mall.common.result.R;
 import com.mall.core.model.dto.AfterSaleHandleDTO;
 import com.mall.core.model.vo.AfterSaleVO;
 import com.mall.core.enums.RefundStatus;
+import com.mall.core.audit.AuditAction;
 import com.mall.core.service.AfterSaleService;
+import com.mall.core.service.AuditService;
 import com.mall.core.service.PaymentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -17,16 +19,19 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.RestController;
 
 @Tag(name = "后台售后")
 @RestController
 @RequestMapping("/api/v1/admin/after-sale")
 @RequiredArgsConstructor
+@PreAuthorize("hasAuthority('after-sale:view')")
 public class AfterSaleController {
 
     private final AfterSaleService afterSaleService;
     private final PaymentService paymentService;
+    private final AuditService auditService;
 
     @Operation(summary = "售后单列表（status 可选：0 待处理 1 已退款 2 已拒绝 3 已撤销）")
     @GetMapping("/page")
@@ -44,15 +49,22 @@ public class AfterSaleController {
 
     @Operation(summary = "同意并退款（退货退款会恢复库存）")
     @PostMapping("/{id}/approve")
+    @PreAuthorize("hasAuthority('after-sale:handle')")
     public R<Void> approve(@PathVariable Long id, @Valid @RequestBody(required = false) AfterSaleHandleDTO dto) {
         afterSaleService.approve(id, dto == null ? null : dto.getRemark());
+        // 退款是对钱的操作，必须留痕（谁批的、备注是什么）
+        auditService.record(AuditAction.AFTER_SALE_APPROVE, "AFTER_SALE", id,
+                dto == null ? null : "remark=" + dto.getRemark());
         return R.ok(null);
     }
 
     @Operation(summary = "拒绝售后")
     @PostMapping("/{id}/reject")
+    @PreAuthorize("hasAuthority('after-sale:handle')")
     public R<Void> reject(@PathVariable Long id, @Valid @RequestBody(required = false) AfterSaleHandleDTO dto) {
         afterSaleService.reject(id, dto == null ? null : dto.getRemark());
+        auditService.record(AuditAction.AFTER_SALE_REJECT, "AFTER_SALE", id,
+                dto == null ? null : "remark=" + dto.getRemark());
         return R.ok(null);
     }
     /**
@@ -63,6 +75,7 @@ public class AfterSaleController {
      */
     @Operation(summary = "查询退款真实状态")
     @PostMapping("/{id}/query-refund")
+    @PreAuthorize("hasAuthority('after-sale:handle')")
     public R<java.util.Map<String, Object>> queryRefund(@PathVariable Long id) {
         int status = paymentService.queryRefund(id);
         return R.ok(java.util.Map.of(

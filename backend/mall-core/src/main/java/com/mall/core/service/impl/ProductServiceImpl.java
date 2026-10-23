@@ -7,10 +7,16 @@ import com.mall.common.exception.BusinessException;
 import com.mall.common.result.PageResult;
 import com.mall.common.result.ResultCode;
 import com.mall.core.entity.Category;
+import com.mall.core.entity.FreightTemplate;
 import com.mall.core.entity.Product;
 import com.mall.core.entity.Sku;
+import com.mall.core.enums.DeliveryType;
+import com.mall.core.enums.FreightType;
+import com.mall.core.enums.ProductType;
 import com.mall.core.mapper.CategoryMapper;
+import com.mall.core.mapper.FreightTemplateMapper;
 import com.mall.core.mapper.ProductMapper;
+import com.mall.core.mapper.SearchLogMapper;
 import com.mall.core.mapper.SkuMapper;
 import com.mall.core.model.dto.ProductDTO;
 import com.mall.core.model.dto.SkuDTO;
@@ -20,11 +26,14 @@ import com.mall.core.model.vo.SkuVO;
 import com.mall.core.service.CategoryService;
 import com.mall.core.service.ProductService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -34,6 +43,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class ProductServiceImpl implements ProductService {
@@ -42,26 +52,130 @@ public class ProductServiceImpl implements ProductService {
     private static final String SORT_PRICE_DESC = "price_desc";
     private static final String SORT_SALES_DESC = "sales_desc";
     private static final String SORT_NEW = "new";
+    /** 相关度：只在有关键词时才有意义 */
+    private static final String SORT_RELEVANCE = "relevance";
     private static final long MAX_PAGE_SIZE = 100L;
 
     private final ProductMapper productMapper;
     private final SkuMapper skuMapper;
     private final CategoryMapper categoryMapper;
     private final CategoryService categoryService;
+    private final FreightTemplateMapper freightTemplateMapper;
+    private final SearchLogMapper searchLogMapper;
 
     @Override
     public PageResult<ProductVO> pageForPortal(long pageNum, long pageSize, Long categoryId, String keyword,
                                                BigDecimal minPrice, BigDecimal maxPrice, String sort) {
+        String kw = StringUtils.hasText(keyword) ? keyword.trim() : null;
         LambdaQueryWrapper<Product> w = Wrappers.<Product>lambdaQuery().eq(Product::getStatus, 1);
-        applyCommonFilter(w, categoryId, keyword, minPrice, maxPrice);
-        switch (sort == null ? "" : sort) {
-            case SORT_PRICE_ASC -> w.orderByAsc(Product::getPrice);
-            case SORT_PRICE_DESC -> w.orderByDesc(Product::getPrice);
-            case SORT_SALES_DESC -> w.orderByDesc(Product::getSales);
-            case SORT_NEW -> w.orderByDesc(Product::getId);
-            default -> w.orderByDesc(Product::getSales).orderByDesc(Product::getId);
+        if (kw != null) {
+            // 四路都搜：商品名、副标题、详情、分类名（分类名走子查询，避免为了搜分类去 JOIN 分页）
+            String categoryLike = "SELECT id FROM t_category WHERE deleted = 0 AND name LIKE " + likeLiteral(kw);
+            w.and(q -> q.like(Product::getName, kw)
+                    .or().like(Product::getSubTitle, kw)
+                    .or().like(Product::getDetail, kw)
+                    .or().inSql(Product::getCategoryId, categoryLike));
+            // 记热词：只记关键词，失败不能影响搜索本身
+            try {
+                searchLogMapper.insert(kw);
+            } catch (Exception e) {
+                log.warn("[search] record keyword failed: {}", kw, e);
+            }
+        }
+        // keyword 已在上面处理，这里只传分类/价格
+        applyCommonFilter(w, categoryId, null, minPrice, maxPrice);
+
+        String s = sort == null ? "" : sort;
+        if (kw != null && (s.isEmpty() || SORT_RELEVANCE.equals(s))) {
+            // 相关度排序只能用 SQL 表达式，MP 的 orderBy 表达不了；关键词已转义后再拼
+            w.last("ORDER BY " + relevanceOrder(kw) + ", sales DESC, id DESC");
+        } else {
+            switch (s) {
+                case SORT_PRICE_ASC -> w.orderByAsc(Product::getPrice);
+                case SORT_PRICE_DESC -> w.orderByDesc(Product::getPrice);
+                case SORT_SALES_DESC -> w.orderByDesc(Product::getSales);
+                case SORT_NEW -> w.orderByDesc(Product::getId);
+                // 没有关键词却要"最相关"：等价于综合排序，别让用户看到随机顺序
+                default -> w.orderByDesc(Product::getSales).orderByDesc(Product::getId);
+            }
         }
         return doPage(pageNum, pageSize, w);
+    }
+
+    /**
+     * 相关度：命中位置越"重要"分越高。
+     *
+     * <p>为什么不只用 LIKE 过滤 + 销量排序：搜「手机」时，标题里就叫「手机」的商品
+     * 应该排在"详情里提了一句手机"的商品前面，否则搜索结果看起来完全不相关。
+     */
+    private String relevanceOrder(String kw) {
+        String eq = sqlLiteral(kw);
+        String prefix = prefixLiteral(kw);
+        String contains = likeLiteral(kw);
+        return "CASE "
+                + "WHEN name = " + eq + " THEN 100 "
+                + "WHEN name LIKE " + prefix + " THEN 80 "
+                + "WHEN name LIKE " + contains + " THEN 60 "
+                + "WHEN sub_title LIKE " + contains + " THEN 40 "
+                + "WHEN category_id IN (SELECT id FROM t_category WHERE deleted = 0 AND name LIKE "
+                + contains + ") THEN 30 "
+                + "ELSE 10 END DESC";
+    }
+
+    /**
+     * 拼进 SQL 的字符串字面量：单引号、反斜杠要转义。
+     * （相关度 ORDER BY 没法用预编译参数，只能自己做这件事；别直接拼原始输入。）
+     */
+    private static String sqlLiteral(String value) {
+        return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'";
+    }
+
+    /**
+     * LIKE 模式的字面量：**先**转义用户输入里的通配符，**再**加两侧 {@code %}。
+     *
+     * <p>顺序不能反：先把 '%kw%' 拼好再整体转义，会把我们自己加的通配符也转义成字面量，
+     * 于是 `LIKE '\%手机\%'` 永远匹配不到任何东西（踩过一次）。
+     */
+    private static String likeLiteral(String raw) {
+        return "'%" + likeEscape(raw) + "%'";
+    }
+
+    /** 前缀 LIKE：'kw%' */
+    private static String prefixLiteral(String raw) {
+        return "'" + likeEscape(raw) + "%'";
+    }
+
+    private static String likeEscape(String raw) {
+        return raw.replace("\\", "\\\\")
+                .replace("'", "''")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
+    }
+
+    @Override
+    public List<String> hotKeywords(int limit) {
+        int n = Math.min(Math.max(limit, 1), 20);
+        return searchLogMapper.hotKeywords(LocalDateTime.now().minusDays(7), n);
+    }
+
+    @Override
+    public List<String> suggest(String keyword, int limit) {
+        if (!StringUtils.hasText(keyword)) {
+            return List.of();
+        }
+        int max = Math.min(Math.max(limit, 1), 20);
+        String kw = keyword.trim();
+        String prefix = kw + "%";
+        // 分类最多占 3 条：用户更常搜的是具体商品，分类多了会把商品挤掉
+        List<String> cats = productMapper.suggestCategories(prefix, Math.min(max, 3));
+        List<String> items = productMapper.suggestProducts(prefix, max);
+        if (items.isEmpty()) {
+            // 前缀没命中时退一步用包含匹配，否则输入"手机壳"这种词什么都提示不出来
+            items = productMapper.suggestProducts("%" + kw + "%", max);
+        }
+        Set<String> out = new java.util.LinkedHashSet<>(cats);
+        out.addAll(items);
+        return out.stream().limit(max).toList();
     }
 
     @Override
@@ -211,7 +325,38 @@ public class ProductServiceImpl implements ProductService {
                 .orderByAsc(Sku::getId));
         Category c = p.getCategoryId() == null ? null : categoryMapper.selectById(p.getCategoryId());
         List<SkuVO> skuVOs = skus.stream().map(SkuVO::from).toList();
-        return ProductDetailVO.from(p, c == null ? null : c.getName(), splitImages(p.getImages()), skuVOs);
+        ProductDetailVO vo = ProductDetailVO.from(p, c == null ? null : c.getName(), splitImages(p.getImages()), skuVOs);
+        vo.setFreightText(freightTextOf(p));
+        return vo;
+    }
+
+    /**
+     * 运费文案由后端拼：前台只负责显示，不必懂「固定运费 / 满额包邮 / 模板停用算包邮」这些规则。
+     * 规则必须和 PricingServiceImpl 一致，否则会出现「详情页说包邮、结算页却收 8 元」。
+     */
+    private String freightTextOf(Product p) {
+        if (ProductType.of(p.getProductType()) == ProductType.VIRTUAL) {
+            return "虚拟商品，无需物流";
+        }
+        if (p.getFreightTemplateId() == null) {
+            return "包邮";
+        }
+        FreightTemplate t = freightTemplateMapper.selectById(p.getFreightTemplateId());
+        // 模板被删/停用：计价时按包邮处理，文案也必须说包邮
+        if (t == null || Objects.equals(t.getStatus(), 0)) {
+            return "包邮";
+        }
+        BigDecimal fee = t.getBaseFee() == null ? BigDecimal.ZERO : t.getBaseFee();
+        FreightType type = FreightType.of(t.getType());
+        if (type == FreightType.FREE_OVER && t.getFreeThreshold() != null) {
+            String threshold = t.getFreeThreshold().stripTrailingZeros().toPlainString();
+            return fee.compareTo(BigDecimal.ZERO) > 0
+                    ? "满 ¥" + threshold + " 包邮，未满运费 ¥" + fee.setScale(2, RoundingMode.HALF_UP)
+                    : "满 ¥" + threshold + " 包邮";
+        }
+        return fee.compareTo(BigDecimal.ZERO) > 0
+                ? "运费 ¥" + fee.setScale(2, RoundingMode.HALF_UP)
+                : "包邮";
     }
 
     /** 更新时按 id 对齐 SKU：有 id 更新、无 id 新增、未出现的逻辑删除 */
@@ -249,6 +394,31 @@ public class ProductServiceImpl implements ProductService {
         p.setPrice(dto.getPrice());
         if (dto.getStatus() != null) {
             p.setStatus(normalizeStatus(dto.getStatus()));
+        }
+
+        ProductType type = ProductType.of(dto.getProductType());
+        p.setProductType(type.getCode());
+        if (type == ProductType.VIRTUAL) {
+            DeliveryType delivery = DeliveryType.of(dto.getDeliveryType());
+            if (delivery == null) {
+                throw new BusinessException(ResultCode.VIRTUAL_GOODS_CONFIG_ERROR, "请选择发放方式（卡密/外链）");
+            }
+            if (delivery == DeliveryType.LINK && !StringUtils.hasText(dto.getDeliveryUrl())) {
+                throw new BusinessException(ResultCode.VIRTUAL_GOODS_CONFIG_ERROR, "外链类商品必须填写下载地址");
+            }
+            p.setDeliveryType(delivery.getCode());
+            p.setDeliveryUrl(delivery == DeliveryType.LINK ? dto.getDeliveryUrl().trim() : null);
+            // 虚拟商品没有物流：运费模板一律置空，结算页不该出现运费
+            p.setFreightTemplateId(null);
+        } else {
+            p.setDeliveryType(null);
+            p.setDeliveryUrl(null);
+            // 绑了模板就必须真的存在，否则下单时计价的运费会直接抛异常
+            if (dto.getFreightTemplateId() != null
+                    && freightTemplateMapper.selectById(dto.getFreightTemplateId()) == null) {
+                throw new BusinessException(ResultCode.FREIGHT_TEMPLATE_NOT_FOUND);
+            }
+            p.setFreightTemplateId(dto.getFreightTemplateId());
         }
     }
 

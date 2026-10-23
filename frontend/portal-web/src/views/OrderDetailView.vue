@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { showConfirmDialog, showSuccessToast } from 'vant'
-import { afterSaleApi, orderApi } from '@/api'
-import type { AfterSaleVO, OrderVO } from '@/types'
+import { showConfirmDialog, showSuccessToast, showToast } from 'vant'
+import { afterSaleApi, digitalApi, orderApi, reviewApi } from '@/api'
+import type { AfterSaleVO, DigitalGrantVO, OrderVO } from '@/types'
 import { formatDateTime, money } from '@/utils/format'
 
 const route = useRoute()
@@ -18,6 +18,62 @@ const loadFailed = ref(false)
 /** 已支付 / 已发货 / 已完成 且没有售后单时才能申请（和后台的校验一致） */
 const canApply = computed(() => !!order.value && [1, 2, 3].includes(order.value.status) && !afterSale.value)
 
+/** 运单号要能一键复制：用户基本都会粘贴到快递 App 里查 */
+async function copyShipNo() {
+  const no = order.value?.shipNo
+  if (!no) return
+  try {
+    await navigator.clipboard.writeText(no)
+    showToast('运单号已复制')
+  } catch {
+    // 非 https / 不支持 clipboard 的环境，退回选中提示
+    showToast(`运单号：${no}`)
+  }
+}
+
+/** 已评价的订单项 id（订单完成时才查） */
+const reviewedIds = ref<number[]>([])
+
+function gotoReview(item: { id: number; productName?: string; spec?: string }) {
+  router.push({
+    name: 'review-edit',
+    params: { orderItemId: item.id },
+    query: { name: item.productName || '', spec: item.spec || '' }
+  })
+}
+
+/** 虚拟商品凭证：列表不带明文，点「查看」才调 reveal（会累加查看次数） */
+const grants = ref<DigitalGrantVO[]>([])
+const contents = ref<Record<number, string>>({})
+
+async function loadGrants(orderId: number) {
+  grants.value = await digitalApi.byOrder(orderId).catch(() => [])
+}
+
+async function revealGrant(g: DigitalGrantVO) {
+  try {
+    await showConfirmDialog({
+      title: '查看凭证',
+      message: '查看后视为已使用，该订单将不支持自助退款'
+    })
+  } catch {
+    return
+  }
+  try {
+    const r = await digitalApi.reveal(g.id)
+    contents.value = { ...contents.value, [g.id]: r.content }
+    await loadGrants(g.orderId)
+  } catch {
+    // 拦截器已提示
+  }
+}
+
+/** 卡密内容是「卡号|卡密」，分两行显示更好抄 */
+function parts(content: string) {
+  const [no, secret] = content.split('|')
+  return { no, secret }
+}
+
 async function load() {
   const raw = route.params.id
   const id = Number(Array.isArray(raw) ? raw[0] : raw)
@@ -26,6 +82,10 @@ async function load() {
     loadFailed.value = false
     // 查一次最近一条售后单：有就显示入口，没有返回 null（不是错误）
     afterSale.value = await afterSaleApi.byOrder(id).catch(() => null)
+    if (order.value?.orderType === 2) await loadGrants(id)
+    if (order.value?.status === 3) {
+      reviewedIds.value = await reviewApi.reviewed(id).catch(() => [])
+    }
   } catch {
     // ⚠️ 别把这个异常放出去：onMounted 的回调被 Vue 用 callWithAsyncErrorHandling 包过，
     // reject 会一路冒到全局错误边界，把整页换成「页面出错了」——
@@ -105,15 +165,20 @@ onMounted(load)
       </van-cell-group>
 
       <van-cell-group inset class="block">
-        <van-card
-          v-for="it in order.items"
-          :key="it.id"
-          :num="it.quantity"
-          :price="Number(it.price).toFixed(2)"
-          :title="it.productName"
-          :desc="it.spec"
-          :thumb="it.productImage || ''"
-        />
+        <div v-for="it in order.items" :key="it.id" class="order-item">
+          <van-card
+            :num="it.quantity"
+            :price="Number(it.price).toFixed(2)"
+            :title="it.productName"
+            :desc="it.spec"
+            :thumb="it.productImage || ''"
+          />
+          <!-- 只有已完成订单能评价，一个订单项只能评一次（服务端也用唯一键兜底） -->
+          <div v-if="order.status === 3" class="item-ops">
+            <van-button v-if="reviewedIds.includes(it.id)" size="small" plain disabled>已评价</van-button>
+            <van-button v-else size="small" plain type="danger" @click="gotoReview(it)">评价</van-button>
+          </div>
+        </div>
       </van-cell-group>
 
       <van-cell-group inset class="block">
@@ -121,7 +186,44 @@ onMounted(load)
         <van-cell title="下单时间" :value="formatDateTime(order.createTime)" />
         <van-cell title="支付时间" :value="formatDateTime(order.payTime)" />
         <van-cell title="商品金额" :value="money(order.totalAmount)" />
+        <van-cell v-if="order.freightAmount" title="运费" :value="money(order.freightAmount)" />
+        <van-cell v-if="order.discountAmount" title="优惠" :value="`-${money(order.discountAmount)}`" />
         <van-cell title="实付金额" :value="money(order.payAmount)" class="payable" />
+      </van-cell-group>
+
+      <van-cell-group v-if="order.shipNo" inset class="block">
+        <van-cell title="物流信息" />
+        <van-cell title="快递公司" :value="order.shipCompanyText || '-'" />
+        <van-cell title="运单号" :value="order.shipNo" is-link @click="copyShipNo" />
+        <van-cell v-if="order.shipTime" title="发货时间" :value="formatDateTime(order.shipTime)" />
+      </van-cell-group>
+
+      <van-cell-group v-if="order.orderType === 2" inset class="block">
+        <van-cell title="虚拟商品凭证" :value="`共 ${grants.length} 张`" />
+        <div v-for="g in grants" :key="g.id" class="grant">
+          <div class="grant-head">
+            <span class="grant-name">{{ g.productName }}</span>
+            <van-tag :type="g.status === 1 ? 'danger' : 'default'">{{ g.statusText }}</van-tag>
+          </div>
+          <div class="muted grant-meta">{{ g.deliveryTypeText }} · 已查看 {{ g.viewCount }} 次</div>
+          <van-button
+            v-if="g.status === 1"
+            size="small"
+            type="danger"
+            plain
+            @click="revealGrant(g)"
+          >
+            {{ contents[g.id] ? '已显示' : '查看' }}
+          </van-button>
+          <div v-if="contents[g.id]" class="grant-content">
+            <template v-if="g.deliveryType === 1">
+              <div>卡号：{{ parts(contents[g.id]).no }}</div>
+              <div>卡密：{{ parts(contents[g.id]).secret }}</div>
+            </template>
+            <div v-else class="link">{{ contents[g.id] }}</div>
+          </div>
+        </div>
+        <div v-if="!grants.length" class="muted grant-empty">凭证生成中，请稍后刷新</div>
       </van-cell-group>
 
       <div v-if="order.status === 0 || order.status === 2 || canApply || afterSale" class="footer">
@@ -152,6 +254,58 @@ onMounted(load)
 <style scoped>
 .block {
   margin-top: 12px;
+}
+
+.order-item {
+  border-bottom: 1px solid #f5f6f7;
+}
+
+.order-item:last-child {
+  border-bottom: none;
+}
+
+.item-ops {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 16px 10px;
+}
+
+.grant {
+  padding: 12px 16px;
+  border-top: 1px solid #f2f3f5;
+}
+
+.grant-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.grant-name {
+  flex: 1;
+  font-weight: 600;
+}
+
+.grant-meta {
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.grant-content {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #fff7f0;
+  font-family: monospace;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+.grant-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
 }
 
 .status-block {

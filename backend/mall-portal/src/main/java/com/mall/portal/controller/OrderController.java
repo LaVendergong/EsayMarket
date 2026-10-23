@@ -4,7 +4,9 @@ import com.mall.common.result.PageResult;
 import com.mall.common.result.R;
 import com.mall.core.model.dto.CreateDirectOrderDTO;
 import com.mall.core.model.dto.CreateOrderDTO;
+import com.mall.core.model.dto.PreviewOrderDTO;
 import com.mall.core.model.vo.OrderCreateVO;
+import com.mall.core.model.vo.OrderPreviewVO;
 import com.mall.core.model.vo.OrderVO;
 import com.mall.core.security.UserContext;
 import com.mall.core.service.OrderService;
@@ -43,6 +45,12 @@ public class OrderController {
     public R<OrderCreateVO> createDirect(@RequestBody CreateDirectOrderDTO dto) {
         Long userId = UserContext.requireUserId();
         return R.ok(DeadlockRetry.run(() -> orderService.createDirect(userId, dto)));
+    }
+
+    @Operation(summary = "结算试算：返回运费/优惠/应付与可用券（只读，不锁库存）")
+    @PostMapping("/preview")
+    public R<OrderPreviewVO> preview(@RequestBody(required = false) PreviewOrderDTO dto) {
+        return R.ok(orderService.preview(UserContext.requireUserId(), dto));
     }
 
     @Operation(summary = "我的订单分页（status 可选）")

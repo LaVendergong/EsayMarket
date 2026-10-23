@@ -37,6 +37,15 @@ const STOCK = 10
 const QTY = 2
 const TOTAL = (PRICE * QTY).toFixed(2)
 
+// 计价链路（运费 + 券）用的测试数据：全部由脚本自己建、自己删，不依赖种子数据
+const FREIGHT_NAME = 'Web 流程运费模板'
+const FREIGHT_FEE = 8
+const COUPON_NAME = 'Web 流程测试券'
+const COUPON_AMOUNT = 20
+const GOODS = PRICE * QTY
+const PAY_WITH_FREIGHT = (GOODS + FREIGHT_FEE).toFixed(2) // 208.00
+const PAY_WITH_COUPON = (GOODS + FREIGHT_FEE - COUPON_AMOUNT).toFixed(2) // 188.00
+
 const report = []
 const log = (s) => {
   report.push(s)
@@ -67,9 +76,14 @@ function purge(message) {
       `DELETE o FROM t_order o WHERE o.user_id IN (SELECT id FROM t_user WHERE username = '${BUYER}'); ` +
       `DELETE FROM t_cart WHERE user_id IN (SELECT id FROM t_user WHERE username = '${BUYER}'); ` +
       `DELETE FROM t_address WHERE user_id IN (SELECT id FROM t_user WHERE username = '${BUYER}'); ` +
+      // 用户券必须先删：它引用 user_id，删完用户就成孤儿数据
+      `DELETE uc FROM t_user_coupon uc JOIN t_user u ON uc.user_id = u.id WHERE u.username = '${BUYER}'; ` +
       `DELETE FROM t_user WHERE username = '${BUYER}'; ` +
       `DELETE s FROM t_sku s JOIN t_product p ON s.product_id = p.id WHERE p.name = '${ITEM}'; ` +
       `DELETE FROM t_product WHERE name = '${ITEM}'; ` +
+      // 商品删掉之后模板才能删（后台删模板会被「还有商品在用」挡住，这里直接删库）
+      `DELETE FROM t_freight_template WHERE name = '${FREIGHT_NAME}'; ` +
+      `DELETE FROM t_coupon WHERE name = '${COUPON_NAME}'; ` +
       `DELETE FROM t_category WHERE name = '${CAT}';`
   )
   info(message)
@@ -111,6 +125,15 @@ const catR = await api('POST', `${ADMIN_API}/api/v1/admin/category`, {
   token: adminToken
 })
 const catId = catR.data
+
+// 先建运费模板，商品创建时直接绑上：这样结算页的「运费」不是写死的 0
+const freightR = await api('POST', `${ADMIN_API}/api/v1/admin/freight`, {
+  body: { name: FREIGHT_NAME, type: 'FIXED', baseFee: FREIGHT_FEE, status: 1 },
+  token: adminToken
+})
+const freightId = freightR.data
+check('准备：运费模板已就绪', freightR.code === 200 && !!freightId, `freightId=${freightId} fee=${FREIGHT_FEE}`)
+
 const prodR = await api('POST', `${ADMIN_API}/api/v1/admin/product`, {
   body: {
     categoryId: catId,
@@ -118,12 +141,21 @@ const prodR = await api('POST', `${ADMIN_API}/api/v1/admin/product`, {
     subTitle: '全流程测试用',
     price: PRICE,
     status: 1,
+    freightTemplateId: freightId,
     skus: [{ skuCode: SPEC, spec: SPEC, price: PRICE, stock: STOCK }]
   },
   token: adminToken
 })
 const prodId = prodR.data
 check('准备：测试商品已就绪', catR.code === 200 && prodR.code === 200 && !!prodId, `categoryId=${catId} productId=${prodId} stock=${STOCK} price=${PRICE}`)
+
+// 满 100 减 20：买 2 件（200）刚好够门槛
+const couponR = await api('POST', `${ADMIN_API}/api/v1/admin/coupon`, {
+  body: { name: COUPON_NAME, threshold: 100, amount: COUPON_AMOUNT, total: 100, status: 1 },
+  token: adminToken
+})
+const couponId = couponR.data
+check('准备：测试优惠券已就绪', couponR.code === 200 && !!couponId, `couponId=${couponId} 满100减${COUPON_AMOUNT}`)
 
 // ------------------------------------------------------------------ 起浏览器
 const browser = await launch({
@@ -194,8 +226,17 @@ try {
   // ================================================================ H5：首页 → 商品详情
   log('')
   log('--- H5：浏览 → 选规格 → 加购 ---')
+  // 商品总量上来以后，销量为 0 的测试商品排不进第一页，用搜索框定位（顺带覆盖搜索链路）
+  await setInput('.van-search input', ITEM)
+  await evalJs(`(() => {
+    const el = document.querySelector('.van-search input');
+    const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
+    el.dispatchEvent(new KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new KeyboardEvent('keypress', opts));
+    return true;
+  })()`)
   const sawProduct = await waitFor(pageHas(ITEM), 8000)
-  check('首页列表出现测试商品', sawProduct, `找到「${ITEM}」=${sawProduct}`)
+  check('搜索能定位到测试商品', sawProduct, `找到「${ITEM}」=${sawProduct}`)
 
   await clickText('.van-card', ITEM)
   const onDetail = await waitFor(onRoute('product/'), 6000)
@@ -267,6 +308,86 @@ try {
     `hash=${await evalJs('location.hash')} 收货人可见=${checkoutText.includes('流程测试收货人')}`
   )
 
+  // ================================================================ H5：领券中心
+  log('')
+  log('--- H5：领券中心 ---')
+  await goto(`${PORTAL_WEB}/#/coupon`, 3000)
+  const onCouponPage = await waitFor(onRoute('coupon'), 6000)
+  check('进入优惠券页', onCouponPage, `hash=${await evalJs('location.hash')}`)
+
+  await clickText('.van-tab', '领券中心')
+  const sawCoupon = await waitText(COUPON_NAME, 6000)
+  check('领券中心列出测试券', sawCoupon, `含券名=${sawCoupon}`)
+
+  // van-tabs 会把两个面板都渲染出来（非激活面板只是隐藏），所以必须限定「可见」的卡片，
+  // 否则会命中「我的券」里刚领到的那张（按钮是「去使用」，且隐藏面板 innerText 为空）
+  const visibleCouponCard = `(() => [...document.querySelectorAll('.coupon')].find((c) =>
+    c.offsetParent !== null && (c.innerText || '').includes(${JSON.stringify(COUPON_NAME)})))()`
+  const claimClicked = await evalJs(`(() => {
+    const card = ${visibleCouponCard};
+    if (!card) return 'no-card';
+    const btn = [...card.querySelectorAll('button')].find((b) => (b.innerText || '').includes('领取'));
+    if (!btn) return 'no-btn';
+    btn.click();
+    return 'ok';
+  })()`)
+  check('点击「领取」', claimClicked === 'ok', `clicked=${claimClicked}`)
+
+  const claimDone = await waitFor(
+    `(() => {
+      const card = ${visibleCouponCard};
+      return !!card && (card.innerText || '').includes('已领取');
+    })()`,
+    8000
+  )
+  check('领取后按钮变「已领取」', claimDone, `claimed=${claimDone}`)
+
+  // ================================================================ H5：结算页运费 / 选券
+  log('')
+  log('--- H5：结算页运费 → 选券 → 应付 ---')
+  await goto(`${PORTAL_WEB}/#/checkout`, 3500)
+  await waitText('应付金额')
+  const pricedShown = await waitText(PAY_WITH_FREIGHT, 8000)
+  const coText = await innerText()
+  check(
+    `结算页显示运费 ¥${FREIGHT_FEE}.00（不是写死的 0）`,
+    pricedShown && coText.includes('运费') && coText.includes(`${FREIGHT_FEE}.00`),
+    `含运费行=${coText.includes('运费')} 含${FREIGHT_FEE}.00=${coText.includes(`${FREIGHT_FEE}.00`)}`
+  )
+  check(
+    `未用券时应付 = 商品 ${GOODS} + 运费 ${FREIGHT_FEE} = ${PAY_WITH_FREIGHT}`,
+    coText.includes(PAY_WITH_FREIGHT),
+    `含${PAY_WITH_FREIGHT}=${coText.includes(PAY_WITH_FREIGHT)}`
+  )
+
+  await clickText('.van-cell', '优惠券')
+  const popupUp = await waitFor(
+    `[...document.querySelectorAll('.van-popup')].some((p) => (p.innerText || '').includes(${JSON.stringify(COUPON_NAME)}))`,
+    6000
+  )
+  check('选券弹窗列出该券', popupUp, `popup=${popupUp}`)
+
+  const couponPicked = await evalJs(`(() => {
+    const cell = [...document.querySelectorAll('.van-popup .van-cell')].find((c) => (c.innerText || '').includes(${JSON.stringify(COUPON_NAME)}));
+    if (!cell) return 'no-cell';
+    cell.click();
+    return 'ok';
+  })()`)
+  check('选中该券', couponPicked === 'ok', `clicked=${couponPicked}`)
+
+  const payDropped = await waitText(PAY_WITH_COUPON, 8000)
+  const coText2 = await innerText()
+  check(
+    `选券后应付 = ${PAY_WITH_FREIGHT} - ${COUPON_AMOUNT} = ${PAY_WITH_COUPON}`,
+    payDropped,
+    `含${PAY_WITH_COUPON}=${payDropped}`
+  )
+  check(
+    `出现优惠行 -¥${COUPON_AMOUNT}.00`,
+    coText2.includes('优惠') && coText2.includes(`${COUPON_AMOUNT}.00`),
+    `含优惠=${coText2.includes('优惠')} 含${COUPON_AMOUNT}.00=${coText2.includes(`${COUPON_AMOUNT}.00`)}`
+  )
+
   // ================================================================ H5：提交订单
   log('')
   log('--- H5：下单 → 支付 ---')
@@ -279,11 +400,18 @@ try {
   await clickText('.van-submit-bar__button', '提交订单')
   // 现在提交订单后进的是**收银台**（选渠道 -> 支付 -> 等回调），不再直接把订单标成已支付
   const onCashier = await waitFor(onRoute('pay/'), 10000)
+  // 渠道列表是异步拉的，等它落地再取文本，否则偶发"渠道列表为空"
+  await waitText('模拟支付', 6000)
   const cashierText = await innerText()
   check(
     '提交订单后进入收银台（而不是直接标记已支付）',
     onCashier && cashierText.includes('需支付') && cashierText.includes('选择支付方式'),
     `hash=${await evalJs('location.hash')} 文本="${cashierText.slice(0, 150)}"`
+  )
+  check(
+    `收银台需支付 = ${PAY_WITH_COUPON}（结算页选中的券真的带到了订单里）`,
+    cashierText.includes(PAY_WITH_COUPON),
+    `含${PAY_WITH_COUPON}=${cashierText.includes(PAY_WITH_COUPON)}`
   )
 
   // 拿订单号/订单 id，后面后台发货要用
@@ -291,6 +419,29 @@ try {
   orderId = Number(sql(`SELECT id FROM t_order WHERE user_id = ${buyerId} ORDER BY id DESC LIMIT 1;`))
   orderNo = sql(`SELECT order_no FROM t_order WHERE id = ${orderId};`)
   check('订单已落库', orderId > 0 && !!orderNo, `orderId=${orderId} orderNo=${orderNo}`)
+
+  // 金额一律服务端算：前端只传了 userCouponId，不该传任何金额
+  const priceRow = sql(
+    `SELECT CONCAT(total_amount,',',freight_amount,',',discount_amount,',',pay_amount) FROM t_order WHERE id = ${orderId};`
+  )
+  const expectPriceRow = `${GOODS.toFixed(2)},${FREIGHT_FEE.toFixed(2)},${COUPON_AMOUNT.toFixed(2)},${PAY_WITH_COUPON}`
+  check(
+    `订单金额快照 商品/运费/优惠/应付 = ${expectPriceRow}`,
+    priceRow === expectPriceRow,
+    `row=${priceRow}（期望 ${expectPriceRow}）`
+  )
+
+  const itemRow = sql(
+    `SELECT CONCAT(discount_amount,',',pay_amount) FROM t_order_item WHERE order_id = ${orderId} ORDER BY id LIMIT 1;`
+  )
+  check(
+    `明细分摊：优惠 ${COUPON_AMOUNT}.00 / 实付 ${GOODS - COUPON_AMOUNT}.00`,
+    itemRow === `${COUPON_AMOUNT.toFixed(2)},${(GOODS - COUPON_AMOUNT).toFixed(2)}`,
+    `row=${itemRow}`
+  )
+
+  const couponStatus = sql(`SELECT status FROM t_user_coupon WHERE user_id = ${buyerId} ORDER BY id DESC LIMIT 1;`)
+  check('下单即锁定券（t_user_coupon.status=1）', couponStatus === '1', `status=${couponStatus}（期望 1）`)
   check(
     `下单只锁不定总库存（${STOCK},${QTY}）`,
     sql(`SELECT CONCAT(stock,',',IFNULL(locked_stock,0)) FROM t_sku WHERE product_id = ${prodId};`) === `${STOCK},${QTY}`,
@@ -343,12 +494,32 @@ try {
   // 发货前先确认订单在库里是「已支付」
   check('发货前订单状态=已支付', sql(`SELECT status FROM t_order WHERE id = ${orderId};`) === '1', `status=${sql(`SELECT status FROM t_order WHERE id = ${orderId};`)}`)
 
+  // 发货要填快递公司 + 运单号：列表里的「发货」会跳到详情页，在那里弹窗填
   await clickIn('.el-table__row', orderNo, '.el-button', '发货')
-  const dialogUp = await waitFor(`!!document.querySelector('.el-message-box__btns')`, 5000)
-  check('发货弹出二次确认', dialogUp, `确认框出现=${dialogUp}`)
-  await clickSelector('.el-message-box__btns .el-button--primary')
+  const onOrderDetail = await waitFor(`location.hash.includes('/order/')`, 8000)
+  check('点发货进入订单详情', onOrderDetail, `hash=${await evalJs('location.hash')}`)
+
+  await clickText('.toolbar .el-button', '发货')
+  const shipDialogUp = await waitFor(
+    `[...document.querySelectorAll('.el-dialog__title')].some((e) => (e.innerText || '').includes('发货'))`,
+    6000
+  )
+  check('发货弹窗打开', shipDialogUp, `dialog=${shipDialogUp}`)
+
+  const trackingNo = `SF${Date.now().toString().slice(-10)}`
+  await setInput('.el-dialog input[placeholder*="运单号"]', trackingNo)
+  await clickText('.el-dialog .el-button', '确认发货')
   const shipped = await waitFor(pageHas('已发货'), 8000)
-  check('后台发货成功，状态=已发货', shipped && sql(`SELECT status FROM t_order WHERE id = ${orderId};`) === '2', `db status=${sql(`SELECT status FROM t_order WHERE id = ${orderId};`)}（期望 2）`)
+  check(
+    '后台发货成功，状态=已发货',
+    shipped && sql(`SELECT status FROM t_order WHERE id = ${orderId};`) === '2',
+    `db status=${sql(`SELECT status FROM t_order WHERE id = ${orderId};`)}（期望 2）`
+  )
+  check(
+    '物流单号落库',
+    sql(`SELECT ship_no FROM t_order WHERE id = ${orderId};`) === trackingNo,
+    `ship_no=${sql(`SELECT ship_no FROM t_order WHERE id = ${orderId};`)}`
+  )
 
   // ================================================================ H5：确认收货
   log('')
@@ -413,7 +584,12 @@ try {
   const directOrderId = Number(sql(`SELECT id FROM t_order WHERE user_id = ${buyerId} ORDER BY id DESC LIMIT 1;`))
   const directRow = sql(`SELECT CONCAT(pay_amount, ',', IFNULL(request_id, '')) FROM t_order WHERE id = ${directOrderId};`)
   const [directAmount, directReqId] = directRow.split(',')
-  check('立即购买订单金额 = 数量 x 单价（200.00）', directAmount === '200.00', `pay_amount=${directAmount}`)
+  // 商品已经绑了固定 8 元运费模板：数量 2 件 → 200 + 8 = 208（不用券）
+  check(
+    `立即购买订单金额 = 商品 ${GOODS} + 运费 ${FREIGHT_FEE}（${PAY_WITH_FREIGHT}）`,
+    directAmount === PAY_WITH_FREIGHT,
+    `pay_amount=${directAmount}（期望 ${PAY_WITH_FREIGHT}）`
+  )
   check('立即购买订单带幂等键 requestId', !!directReqId, `request_id=${directReqId ? 'set' : '(空)'}`)
 
   // 核心：直连下单必须完全没有动购物车

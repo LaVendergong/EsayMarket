@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 @Tag(name = "商品")
 @RestController
@@ -34,6 +35,19 @@ public class ProductController {
                                          @RequestParam(required = false) BigDecimal maxPrice,
                                          @RequestParam(required = false) String sort) {
         return R.ok(productService.pageForPortal(pageNum, pageSize, categoryId, keyword, minPrice, maxPrice, sort));
+    }
+
+    @Operation(summary = "搜索热词（近 7 天，匿名可访问）")
+    @GetMapping("/hot-keywords")
+    public R<List<String>> hotKeywords(@RequestParam(defaultValue = "10") int limit) {
+        return R.ok(productService.hotKeywords(limit));
+    }
+
+    @Operation(summary = "搜索联想（分类名 + 商品名，匿名可访问）")
+    @GetMapping("/suggest")
+    public R<List<String>> suggest(@RequestParam String keyword,
+                                   @RequestParam(defaultValue = "10") int limit) {
+        return R.ok(productService.suggest(keyword, limit));
     }
 
     @Operation(summary = "商品详情（含 SKU，匿名可访问）")

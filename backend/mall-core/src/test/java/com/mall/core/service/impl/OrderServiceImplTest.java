@@ -20,7 +20,10 @@ import com.mall.core.mapper.ProductMapper;
 import com.mall.core.mapper.SkuMapper;
 import com.mall.core.model.dto.CreateDirectOrderDTO;
 import com.mall.core.model.dto.CreateOrderDTO;
+import com.mall.core.model.dto.PreviewOrderDTO;
 import com.mall.core.model.vo.OrderCreateVO;
+import com.mall.core.model.vo.OrderPreviewVO;
+import com.mall.core.pricing.PricingResult;
 import com.mall.core.service.AddressService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,9 +39,11 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -58,6 +63,9 @@ class OrderServiceImplTest {
     @Mock private ProductMapper productMapper;
     @Mock private SkuMapper skuMapper;
     @Mock private AddressService addressService;
+    @Mock private com.mall.core.pricing.PricingService pricingService;
+    @Mock private com.mall.core.service.CouponService couponService;
+    @Mock private com.mall.core.service.DigitalGoodsService digitalGoodsService;
 
     private OrderServiceImpl service;
     /** 用真实的 SimpleMeterRegistry，不动 mock，才能顺带断言业务指标确实被打了 */
@@ -68,8 +76,24 @@ class OrderServiceImplTest {
         OrderProperties props = new OrderProperties();
         props.setExpireMinutes(30);
         registry = new SimpleMeterRegistry();
-        service = new OrderServiceImpl(orderMapper, orderItemMapper, cartMapper, productMapper, skuMapper,
-                addressService, props, new OrderMetrics(registry));
+        // 计价用真实语义的最小替身：商品金额 = 各行金额之和，无运费无优惠。
+        // 金额分摊本身在 PricingServiceTest 里单独测，这里只保证下单流程能跑通。
+        // lenient：不是每个用例都会走到下单，严格模式下会报 UnnecessaryStubbing
+        lenient().when(pricingService.calculate(anyList(), any(), any())).thenAnswer(inv -> {
+            java.util.List<com.mall.core.pricing.PricingLine> lines = inv.getArgument(0);
+            BigDecimal goods = lines.stream().map(com.mall.core.pricing.PricingLine::lineAmount)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+            return com.mall.core.pricing.PricingResult.builder()
+                    .goodsAmount(goods)
+                    .freightAmount(BigDecimal.ZERO)
+                    .discountAmount(BigDecimal.ZERO)
+                    .payAmount(goods)
+                    .lines(lines.stream().map(l -> com.mall.core.pricing.PricingResult.LineShare.builder()
+                            .skuId(l.getSkuId()).lineAmount(l.lineAmount())
+                            .discountAmount(BigDecimal.ZERO).payAmount(l.lineAmount()).build()).toList())
+                    .build();
+        });        service = new OrderServiceImpl(orderMapper, orderItemMapper, cartMapper, productMapper, skuMapper,
+                addressService, props, new OrderMetrics(registry), pricingService, couponService, digitalGoodsService);
     }
 
     private double counter(String name) {
@@ -182,6 +206,9 @@ class OrderServiceImplTest {
     @Test
     void create_withoutAnyAddress_isRejected() {
         when(cartMapper.selectList(any())).thenReturn(List.of(cart(1L, 10L, 100L, 1)));
+        // 现在先查商品判类型（虚拟订单免地址），再解析地址，所以商品要先 mock 出来
+        when(productMapper.selectById(10L)).thenReturn(product(10L, 1));
+        when(skuMapper.selectById(100L)).thenReturn(sku(100L, 10L, "30.00", 10));
         when(addressService.getDefault(1L)).thenReturn(null);
 
         BusinessException e = catchThrowableOfType(() -> service.create(1L, null), BusinessException.class);
@@ -193,7 +220,7 @@ class OrderServiceImplTest {
     @Test
     void create_withOffShelfProduct_isRejected() {
         when(cartMapper.selectList(any())).thenReturn(List.of(cart(1L, 10L, 100L, 1)));
-        when(addressService.getOwned(1L, 9L)).thenReturn(address());
+        // 商品下架在解析地址之前就拦下了，所以这里不能再 stub 地址（严格模式下会报多余桩）
         when(productMapper.selectById(10L)).thenReturn(product(10L, 0));
 
         BusinessException e = catchThrowableOfType(() -> service.create(1L, dtoWithAddress(9L)), BusinessException.class);
@@ -388,8 +415,7 @@ class OrderServiceImplTest {
 
     @Test
     void createDirect_withUnknownSku_isRejected() {
-        when(addressService.getOwned(1L, 9L)).thenReturn(address());
-        // skuMapper.selectById 未打桩 -> 返回 null
+        // skuMapper.selectById 未打桩 -> 返回 null（地址在商品之后才解析，不用 stub）
 
         BusinessException e = catchThrowableOfType(() -> service.createDirect(1L, directDto(999L, 1)), BusinessException.class);
 
@@ -399,7 +425,6 @@ class OrderServiceImplTest {
 
     @Test
     void createDirect_withOffShelfProduct_isRejected() {
-        when(addressService.getOwned(1L, 9L)).thenReturn(address());
         when(skuMapper.selectById(100L)).thenReturn(sku(100L, 10L, "30.00", 5));
         when(productMapper.selectById(10L)).thenReturn(product(10L, 0));
 
@@ -528,6 +553,64 @@ class OrderServiceImplTest {
         verify(productMapper, never()).incrementSales(anyLong(), anyInt());
     }
 
+    // ================================================================== preview
+    @Test
+    void preview_fromCart_returnsPerLineSharesAndDoesNotTouchStock() {
+        when(cartMapper.selectList(any())).thenReturn(List.of(cart(1L, 10L, 100L, 2)));
+        when(productMapper.selectById(10L)).thenReturn(product(10L, 1));
+        when(skuMapper.selectById(100L)).thenReturn(sku(100L, 10L, "30.00", 10));
+        when(pricingService.calculate(anyList(), any(), any())).thenReturn(PricingResult.builder()
+                .goodsAmount(new BigDecimal("60.00"))
+                .freightAmount(new BigDecimal("8.00"))
+                .discountAmount(new BigDecimal("10.00"))
+                .payAmount(new BigDecimal("58.00"))
+                .userCouponId(7L)
+                .lines(List.of(PricingResult.LineShare.builder()
+                        .skuId(100L)
+                        .lineAmount(new BigDecimal("60.00"))
+                        .discountAmount(new BigDecimal("10.00"))
+                        .payAmount(new BigDecimal("50.00"))
+                        .build()))
+                .build());
+        when(couponService.availableFor(1L, new BigDecimal("60.00"))).thenReturn(List.of());
+
+        PreviewOrderDTO dto = new PreviewOrderDTO();
+        dto.setUserCouponId(7L);
+        OrderPreviewVO vo = service.preview(1L, dto);
+
+        assertThat(vo.getPayAmount()).isEqualByComparingTo("58.00");
+        assertThat(vo.getUserCouponId()).isEqualTo(7L);
+        assertThat(vo.getItems()).hasSize(1);
+        assertThat(vo.getItems().get(0).getLineAmount()).isEqualByComparingTo("60.00");
+        assertThat(vo.getItems().get(0).getPayAmount()).isEqualByComparingTo("50.00");
+        // 试算只读：不锁库存、不落订单
+        verify(skuMapper, never()).lockStock(anyLong(), anyInt());
+        verify(orderMapper, never()).insert(any(Order.class));
+    }
+
+    @Test
+    void preview_directBuy_doesNotReadCart() {
+        when(skuMapper.selectById(100L)).thenReturn(sku(100L, 10L, "30.00", 10));
+        when(productMapper.selectById(10L)).thenReturn(product(10L, 1));
+        when(couponService.availableFor(anyLong(), any())).thenReturn(List.of());
+
+        PreviewOrderDTO dto = new PreviewOrderDTO();
+        dto.setSkuId(100L);
+        dto.setQuantity(1);
+        service.preview(1L, dto);
+
+        verify(cartMapper, never()).selectList(any());
+    }
+
+    @Test
+    void preview_withEmptyCart_isRejected() {
+        when(cartMapper.selectList(any())).thenReturn(List.of());
+
+        BusinessException e = catchThrowableOfType(() -> service.preview(1L, new PreviewOrderDTO()), BusinessException.class);
+
+        assertThat(codeOf(e)).isEqualTo(ResultCode.CART_EMPTY.getCode());
+    }
+
     // ================================================================== cancel / close / timeout
     @Test
     void cancel_releasesLockedStockForEveryItem() {
@@ -565,6 +648,18 @@ class OrderServiceImplTest {
         BusinessException e = catchThrowableOfType(() -> service.detail(1L, 50L), BusinessException.class);
 
         assertThat(codeOf(e)).isEqualTo(ResultCode.ORDER_NOT_FOUND.getCode());
+    }
+
+    @Test
+    void close_byAdminAlsoReleasesTheCoupon() {
+        when(orderItemMapper.selectList(any())).thenReturn(List.of(item(1L, 50L, 10L, 100L, 1, "30.00")));
+        when(orderMapper.update(any(Order.class), any())).thenReturn(1);
+
+        service.close(50L);
+
+        verify(skuMapper).releaseStock(100L, 1);
+        // 和用户取消同一条退出路径：券必须退回来
+        verify(couponService).releaseByOrder(50L);
     }
 
     @Test

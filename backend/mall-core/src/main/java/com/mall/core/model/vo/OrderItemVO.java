@@ -17,6 +17,10 @@ public class OrderItemVO {
     private BigDecimal price;
     private Integer quantity;
     private BigDecimal totalAmount;
+    /** 该行分摊到的优惠 */
+    private BigDecimal discountAmount;
+    /** 该行实付 = totalAmount - discountAmount */
+    private BigDecimal payAmount;
 
     public static OrderItemVO from(OrderItem i) {
         OrderItemVO vo = new OrderItemVO();
@@ -29,6 +33,8 @@ public class OrderItemVO {
         vo.setPrice(i.getPrice());
         vo.setQuantity(i.getQuantity());
         vo.setTotalAmount(i.getTotalAmount());
+        vo.setDiscountAmount(i.getDiscountAmount());
+        vo.setPayAmount(i.getPayAmount());
         return vo;
     }
 }

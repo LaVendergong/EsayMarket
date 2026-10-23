@@ -12,6 +12,11 @@ spring:
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
     time-zone: GMT+8
+  servlet:
+    multipart:
+      # 评价晒图：单张 2MB，一次请求最多 3MB（一张图 + 表单字段）
+      max-file-size: 2MB
+      max-request-size: 3MB
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
@@ -26,6 +31,12 @@ mybatis-plus:
       logic-not-delete-value: 0
 
 mall:
+  upload:
+    # 图片先存本机（后期换对象存储只需换 FileStorage 实现，表里存的仍是 URL）
+    dir: ${MALL_UPLOAD_DIR:./uploads}
+    # 对外前缀：直连应用时留空（URL = /uploads/...），挂 CDN 时填 https://cdn.example.com
+    public-base: ${MALL_UPLOAD_PUBLIC_BASE:}
+    max-bytes: ${MALL_UPLOAD_MAX_BYTES:2097152}
   jwt:
     # 必须与 mall-admin 的 MALL_JWT_SECRET 一致，否则前台签发的 token 后台认不了
     secret: ${MALL_JWT_SECRET:mall-dev-only-INSECURE-secret-0123456789abcdef}
@@ -41,6 +52,11 @@ mall:
       # 并发重复扫描是安全的（关单走条件 UPDATE，只有成功那次才释放库存）。
       enabled: ${MALL_ORDER_TIMEOUT_JOB_ENABLED:true}
       interval-millis: ${MALL_ORDER_TIMEOUT_JOB_INTERVAL_MILLIS:10000}
+  coupon:
+    expire-job:
+      # 过期券状态纠正（0 未使用 → 2 已过期）：两端口都开，条件 UPDATE 保证重复执行安全
+      enabled: ${MALL_COUPON_EXPIRE_JOB_ENABLED:true}
+      interval-millis: ${MALL_COUPON_EXPIRE_JOB_INTERVAL_MILLIS:3600000}
   cors:
     # 允许跨域的来源（逗号分隔）。生产用环境变量覆盖成真实域名，**绝不能写 "*"**
     #（本项目开着 allowCredentials，通配来源 + 携带凭证 = 任意站点都能拿用户身份调后端）

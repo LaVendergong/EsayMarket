@@ -7,6 +7,7 @@ import com.mall.core.model.dto.LoginDTO;
 import com.mall.core.model.vo.LoginVO;
 import com.mall.core.security.AuthCookies;
 import com.mall.core.security.RefreshTokenService;
+import com.mall.core.security.UserContext;
 import com.mall.core.service.UserService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -14,6 +15,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -43,6 +45,17 @@ public class AuthController {
             throw new BusinessException(ResultCode.FORBIDDEN, "非管理员账号，无法登录后台");
         }
         authCookies.issue(response, vo.getToken(), refreshTokenService.issue(vo.getUserId()));
+        return R.ok(vo);
+    }
+
+    /** 当前登录管理员（含权限码）：前端刷新页面后补齐菜单权限 */
+    @Operation(summary = "当前登录管理员信息")
+    @GetMapping("/me")
+    public R<LoginVO> me() {
+        LoginVO vo = userService.profile(UserContext.requireUserId());
+        if (vo.getRole() == null || vo.getRole() != 1) {
+            throw new BusinessException(ResultCode.FORBIDDEN, "非管理员账号");
+        }
         return R.ok(vo);
     }
 

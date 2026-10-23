@@ -50,6 +50,11 @@ export default defineConfig({
       '/img': {
         target: 'http://localhost:8081',
         changeOrigin: true
+      },
+      // 评价晒图：两个应用指向同一个 uploads 目录，所以 8081 也能读到 portal 上传的文件
+      '/uploads': {
+        target: 'http://localhost:8081',
+        changeOrigin: true
       }
     }
   }

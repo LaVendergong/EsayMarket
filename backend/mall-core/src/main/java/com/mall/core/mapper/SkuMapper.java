@@ -35,4 +35,13 @@ public interface SkuMapper extends BaseMapper<Sku> {
      */
     @Update("UPDATE t_sku SET stock = stock + #{qty}, update_time = NOW() WHERE id = #{skuId} AND deleted = 0")
     int restoreStock(@Param("skuId") Long skuId, @Param("qty") int qty);
+
+    /**
+     * 导入卡密时补充库存。
+     *
+     * <p>虚拟商品的库存口径就是"池子里还没卖出去的卡数"，所以导多少张加多少库存，
+     * 下单照旧走 {@link #lockStock} 防超卖，不需要第二套库存。
+     */
+    @Update("UPDATE t_sku SET stock = stock + #{qty}, update_time = NOW() WHERE id = #{skuId} AND deleted = 0")
+    int addStock(@Param("skuId") Long skuId, @Param("qty") int qty);
 }

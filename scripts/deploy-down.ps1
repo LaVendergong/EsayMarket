@@ -42,7 +42,7 @@ Start-Sleep -Seconds 6
 $after = Get-FreeMb
 Write-Host ("== 完成：可用内存 {0:N0} MB（释放 {1:N0} MB）==" -f $after, ($after - $before)) -ForegroundColor Green
 if ($Purge) {
-    Write-Host '  数据卷已删除：下次启动会重新执行 V1..V13 迁移（initdb）' -ForegroundColor Yellow
+    Write-Host '  数据卷已删除：下次启动会重新执行 V1..V24 迁移（initdb）' -ForegroundColor Yellow
 } else {
     Write-Host '  数据卷保留：下次启动直接复用现有数据'
 }

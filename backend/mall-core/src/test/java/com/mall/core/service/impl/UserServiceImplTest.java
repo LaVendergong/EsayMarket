@@ -35,12 +35,14 @@ class UserServiceImplTest {
     @Mock private PasswordEncoder passwordEncoder;
     @Mock private JwtProperties jwtProperties;
     @Mock private LoginThrottle loginThrottle;
+    @Mock private com.mall.core.service.AdminPermissionService adminPermissionService;
 
     private UserServiceImpl service;
 
     @BeforeEach
     void setUp() {
-        service = new UserServiceImpl(userMapper, passwordEncoder, jwtProperties, loginThrottle);
+        service = new UserServiceImpl(userMapper, passwordEncoder, jwtProperties, loginThrottle,
+                adminPermissionService);
     }
 
     private User activeUser() {

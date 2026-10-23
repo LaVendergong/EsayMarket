@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -25,6 +26,7 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import java.util.List;
 
 @Configuration
+@EnableMethodSecurity
 @RequiredArgsConstructor
 public class SecurityConfig {
 
@@ -58,6 +60,8 @@ public class SecurityConfig {
                         .requestMatchers(WHITELIST).permitAll()
                         // 商城浏览类接口匿名开放（只读），下单/购物车等仍要登录
                         .requestMatchers(HttpMethod.GET, "/api/v1/portal/category/**", "/api/v1/portal/product/**").permitAll()
+                        // 商品评价列表：没登录的人看详情页也要能看到别人的评价
+                        .requestMatchers(HttpMethod.GET, "/api/v1/portal/review/product/**").permitAll()
                         // 支付渠道的异步回调：渠道服务器不带我们的 token，必须匿名可达。
                         // 安全性完全依赖各渠道的**验签**（支付宝 RSA2 / 微信平台证书），验不过直接抛异常，
                         // 走不到改订单状态那一步 —— 见 PaymentServiceImpl.handleNotify。

@@ -28,8 +28,28 @@ public class Order extends BaseEntity {
 
     private BigDecimal payAmount;
 
+    /** 运费（按运费模板分组计算后求和） */
+    private BigDecimal freightAmount;
+
+    /** 优惠金额（券） */
+    private BigDecimal discountAmount;
+
+    /** 使用的用户券 id */
+    private Long userCouponId;
+
     /** 见 com.mall.core.enums.OrderStatus */
     private Integer status;
+
+    /** 1 实物 2 虚拟：下单时按商品类型快照（虚拟订单不要地址、支付即发放并直接完成） */
+    private Integer orderType;
+
+    /** 快递公司 code（见 ExpressCompany），发货时写入 */
+    private String shipCompany;
+
+    /** 运单号 */
+    private String shipNo;
+
+    private LocalDateTime shipTime;
 
     /** PII：收货人快照（订单落库时从地址复制，之后地址改了也不影响历史订单） */
     @TableField(typeHandler = EncryptedStringTypeHandler.class)

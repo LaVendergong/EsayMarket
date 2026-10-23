@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { auth } from '@/stores/auth'
 
 /**
@@ -32,8 +33,14 @@ const router = createRouter({
     {
       path: '/',
       component: () => import('@/layouts/AdminLayout.vue'),
-      redirect: '/product',
+      redirect: '/dashboard',
       children: [
+        {
+          path: 'dashboard',
+          name: 'dashboard',
+          component: () => import('@/views/DashboardView.vue'),
+          meta: { title: '首页看板' }
+        },
         {
           path: 'category',
           name: 'category',
@@ -66,10 +73,52 @@ const router = createRouter({
           meta: { title: '商品详情' }
         },
         {
+          path: 'report',
+          name: 'report',
+          component: () => import('@/views/ReportView.vue'),
+          meta: { title: '销售报表' }
+        },
+        {
+          path: 'review',
+          name: 'review',
+          component: () => import('@/views/ReviewListView.vue'),
+          meta: { title: '评价管理' }
+        },
+        {
+          path: 'coupon',
+          name: 'coupon',
+          component: () => import('@/views/CouponListView.vue'),
+          meta: { title: '优惠券管理' }
+        },
+        {
+          path: 'freight',
+          name: 'freight',
+          component: () => import('@/views/FreightListView.vue'),
+          meta: { title: '运费模板' }
+        },
+        {
           path: 'reconcile',
           name: 'reconcile',
           component: () => import('@/views/ReconcileView.vue'),
           meta: { title: '对账' }
+        },
+        {
+          path: 'rbac',
+          name: 'rbac',
+          component: () => import('@/views/RbacView.vue'),
+          meta: { title: '角色权限' }
+        },
+        {
+          path: 'audit',
+          name: 'audit',
+          component: () => import('@/views/AuditLogView.vue'),
+          meta: { title: '操作审计' }
+        },
+        {
+          path: 'maintenance',
+          name: 'maintenance',
+          component: () => import('@/views/MaintenanceView.vue'),
+          meta: { title: '数据维护' }
         },
         {
           path: 'after-sale',
@@ -96,10 +145,20 @@ const router = createRouter({
   ]
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   if (to.meta.public) return true
   if (!auth.isLoggedIn()) {
     return { name: 'login', query: { redirect: to.fullPath } }
+  }
+  // 老版本 localStorage 里没有 permissions，先补一次（/auth/me 只回显资料，不签发新 token）
+  await auth.ensurePermissions()
+  const need = auth.permissionOf(to.path)
+  if (need && !auth.hasPerm(need)) {
+    // 没有权限就别进去，直接停在第一个有权限的页面
+    const fallback = auth.firstAllowedPath()
+    if (fallback && fallback !== to.path) return fallback
+    ElMessage.error('没有访问权限')
+    return false
   }
   return true
 })

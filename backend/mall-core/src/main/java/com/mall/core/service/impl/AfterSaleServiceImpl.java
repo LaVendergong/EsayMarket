@@ -17,13 +17,16 @@ import com.mall.core.enums.RefundStatus;
 import com.mall.core.mapper.AfterSaleMapper;
 import com.mall.core.mapper.OrderItemMapper;
 import com.mall.core.mapper.OrderMapper;
+import com.mall.core.mapper.ProductMapper;
 import com.mall.core.mapper.SkuMapper;
 import com.mall.core.model.dto.AfterSaleApplyDTO;
 import com.mall.core.model.vo.AfterSaleVO;
 import com.mall.core.model.vo.OrderItemVO;
 import com.mall.core.pay.PayModels;
 import com.mall.core.service.AfterSaleService;
+import com.mall.core.service.DigitalGoodsService;
 import com.mall.core.service.PaymentService;
+import com.mall.core.service.ReviewService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -60,7 +63,10 @@ public class AfterSaleServiceImpl implements AfterSaleService {
     private final OrderMapper orderMapper;
     private final OrderItemMapper orderItemMapper;
     private final SkuMapper skuMapper;
+    private final ProductMapper productMapper;
     private final PaymentService paymentService;
+    private final DigitalGoodsService digitalGoodsService;
+    private final ReviewService reviewService;
     /** 审批的最后一步（售后单 + 订单 + 库存）要用事务包住，但退款那次外部调用不能包在里面 */
     private final TransactionTemplate transactionTemplate;
 
@@ -68,13 +74,19 @@ public class AfterSaleServiceImpl implements AfterSaleService {
                                 OrderMapper orderMapper,
                                 OrderItemMapper orderItemMapper,
                                 SkuMapper skuMapper,
+                                ProductMapper productMapper,
                                 PaymentService paymentService,
+                                DigitalGoodsService digitalGoodsService,
+                                ReviewService reviewService,
                                 PlatformTransactionManager transactionManager) {
         this.afterSaleMapper = afterSaleMapper;
         this.orderMapper = orderMapper;
         this.orderItemMapper = orderItemMapper;
         this.skuMapper = skuMapper;
+        this.productMapper = productMapper;
         this.paymentService = paymentService;
+        this.digitalGoodsService = digitalGoodsService;
+        this.reviewService = reviewService;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
@@ -99,6 +111,9 @@ public class AfterSaleServiceImpl implements AfterSaleService {
             throw new BusinessException(ResultCode.AFTER_SALE_NOT_ALLOWED,
                     "当前订单状态（" + OrderStatus.textOf(before) + "）不支持申请售后");
         }
+
+        // 虚拟商品：只允许仅退款，且卡密不能被查看过（看过了退不了，否则等于白送）
+        digitalGoodsService.assertRefundable(order, dto.getType());
 
         // 抢单：把订单从 before 推进到「售后中」。影响 0 行说明刚被别人改过（重复申请/后台关单）
         if (transitionOrder(order.getId(), userId, before, OrderStatus.AFTER_SALE.getCode()) == 0) {
@@ -227,12 +242,22 @@ public class AfterSaleServiceImpl implements AfterSaleService {
                     OrderStatus.AFTER_SALE.getCode(), OrderStatus.REFUNDED.getCode()) == 0) {
                 throw new BusinessException(ResultCode.ORDER_STATUS_ERROR);
             }
+            List<OrderItem> items = itemsOf(as.getOrderId());
             // 退货退款：货退回仓库，库存加回去（仅退款不加，否则账面库存虚高会超卖）
             if (AfterSaleType.needsStockRestore(as.getType())) {
-                for (OrderItem item : itemsOf(as.getOrderId())) {
+                for (OrderItem item : items) {
                     skuMapper.restoreStock(item.getSkuId(), item.getQuantity());
                 }
             }
+            // 虚拟商品：凭证作废，已发出的卡密不回池（同一张卡被卖两次是最严重的事故）
+            digitalGoodsService.revokeByOrder(as.getOrderId(),
+                    items.stream().map(OrderItem::getId).toList());
+            // 退款 = 交易取消：销量要退回去，否则商品列表的销量只增不减，和报表对不上
+            for (OrderItem item : items) {
+                productMapper.decrementSales(item.getProductId(), item.getQuantity());
+            }
+            // 评价保留（用户确实写过），但打上退款标记，不再计入商品评分
+            reviewService.markRefundedByOrder(as.getOrderId());
         });
 
         log.info("[after-sale] approved no={} orderNo={} type={} amount={} refundNo={} channel={} stockRestored={}",

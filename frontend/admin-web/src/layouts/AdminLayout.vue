@@ -2,7 +2,21 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Files, Goods, Money, Service, Tickets } from '@element-plus/icons-vue'
+import {
+  DataLine,
+  Discount,
+  Document,
+  Files,
+  Goods,
+  Money,
+  Odometer,
+  Service,
+  Star,
+  Tickets,
+  Tools,
+  UserFilled,
+  Van
+} from '@element-plus/icons-vue'
 import { authApi } from '@/api'
 import { auth } from '@/stores/auth'
 import AppErrorBoundary from '@/components/AppErrorBoundary.vue'
@@ -18,6 +32,15 @@ const activeMenu = computed(() => {
   const p = route.path
   if (p.startsWith('/product')) return '/product'
   if (p.startsWith('/category')) return '/category'
+  if (p.startsWith('/dashboard')) return '/dashboard'
+  if (p.startsWith('/audit')) return '/audit'
+  if (p.startsWith('/maintenance')) return '/maintenance'
+  if (p.startsWith('/report')) return '/report'
+  if (p.startsWith('/review')) return '/review'
+  if (p.startsWith('/coupon')) return '/coupon'
+  if (p.startsWith('/freight')) return '/freight'
+  if (p.startsWith('/reconcile')) return '/reconcile'
+  if (p.startsWith('/rbac')) return '/rbac'
   if (p.startsWith('/order')) return '/order'
   return p
 })
@@ -42,25 +65,58 @@ async function onCommand(cmd: string) {
     <el-aside width="200px" class="aside">
       <div class="logo">Mall 管理后台</div>
       <el-menu :default-active="activeMenu" router class="menu">
-        <el-menu-item index="/product">
+        <!-- 菜单按权限码显隐：能看到的就有权限，后端每个接口还会再校验一次 -->
+        <el-menu-item v-if="auth.hasPerm('dashboard:view')" index="/dashboard">
+          <el-icon><Odometer /></el-icon>
+          <span>首页看板</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.hasPerm('product:view')" index="/product">
           <el-icon><Goods /></el-icon>
           <span>商品管理</span>
         </el-menu-item>
-        <el-menu-item index="/category">
+        <el-menu-item v-if="auth.hasPerm('category:view')" index="/category">
           <el-icon><Files /></el-icon>
           <span>分类管理</span>
         </el-menu-item>
-        <el-menu-item index="/reconcile">
-          <el-icon><Money /></el-icon>
-          <span>对账</span>
+        <el-menu-item v-if="auth.hasPerm('order:view')" index="/order">
+          <el-icon><Tickets /></el-icon>
+          <span>订单管理</span>
         </el-menu-item>
-        <el-menu-item index="/after-sale">
+        <el-menu-item v-if="auth.hasPerm('after-sale:view')" index="/after-sale">
           <el-icon><Service /></el-icon>
           <span>售后处理</span>
         </el-menu-item>
-        <el-menu-item index="/order">
-          <el-icon><Tickets /></el-icon>
-          <span>订单管理</span>
+        <el-menu-item v-if="auth.hasPerm('review:view')" index="/review">
+          <el-icon><Star /></el-icon>
+          <span>评价管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.hasPerm('coupon:view')" index="/coupon">
+          <el-icon><Discount /></el-icon>
+          <span>优惠券管理</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.hasPerm('freight:view')" index="/freight">
+          <el-icon><Van /></el-icon>
+          <span>运费模板</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.hasPerm('report:view')" index="/report">
+          <el-icon><DataLine /></el-icon>
+          <span>销售报表</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.hasPerm('report:view')" index="/reconcile">
+          <el-icon><Money /></el-icon>
+          <span>对账</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.hasPerm('audit:view')" index="/audit">
+          <el-icon><Document /></el-icon>
+          <span>操作审计</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.hasPerm('maintenance:view')" index="/maintenance">
+          <el-icon><Tools /></el-icon>
+          <span>数据维护</span>
+        </el-menu-item>
+        <el-menu-item v-if="auth.hasPerm('system:rbac')" index="/rbac">
+          <el-icon><UserFilled /></el-icon>
+          <span>角色权限</span>
         </el-menu-item>
       </el-menu>
     </el-aside>

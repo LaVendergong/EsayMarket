@@ -14,6 +14,7 @@ import {
   Field,
   Form,
   Image as VanImage,
+  Rate,
   List,
   Loading,
   NavBar,
@@ -32,7 +33,8 @@ import {
   Tabbar,
   TabbarItem,
   Tabs,
-  Tag
+  Tag,
+  Uploader
 } from 'vant'
 // 样式仍用整份：按组件拆 CSS 要手工维护、漏一个就是「能跑但外观崩」，而 CSS 是独立文件、
 // gzip 后只有几十 kB，不值得为此冒险。这次要解决的是主包 JS 体积。
@@ -61,6 +63,7 @@ const app = createApp(App)
   Field,
   Form,
   VanImage,
+  Rate,
   List,
   Loading,
   NavBar,
@@ -79,7 +82,8 @@ const app = createApp(App)
   Tabbar,
   TabbarItem,
   Tabs,
-  Tag
+  Tag,
+  Uploader
 ].forEach((plugin) => app.use(plugin))
 
 // 必须在 mount 之前装：任何组件抛出的未捕获异常都要有兜底，否则整页白屏

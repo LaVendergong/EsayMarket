@@ -191,7 +191,9 @@ export async function launch({
         Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, ${JSON.stringify(value)});
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('blur', { bubbles: true }));
+        // blur 必须是 FocusEvent：Element Plus 会校验 instanceof，普通 Event 会触发
+        // "Invalid event arguments: event validation failed for event blur" 告警
+        el.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
         return true;
       })()`
     )

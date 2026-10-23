@@ -109,6 +109,30 @@ const router = createRouter({
       meta: { title: '售后详情', auth: true }
     },
     {
+      path: '/review/:orderItemId',
+      name: 'review-edit',
+      component: () => import('@/views/ReviewEditView.vue'),
+      meta: { title: '评价商品', auth: true }
+    },
+    {
+      path: '/favorites',
+      name: 'favorites',
+      component: () => import('@/views/FavoritesView.vue'),
+      meta: { title: '我的收藏', auth: true }
+    },
+    {
+      path: '/digital',
+      name: 'digital',
+      component: () => import('@/views/DigitalView.vue'),
+      meta: { title: '我的卡券', auth: true }
+    },
+    {
+      path: '/coupon',
+      name: 'coupon',
+      component: () => import('@/views/CouponView.vue'),
+      meta: { title: '优惠券', auth: true }
+    },
+    {
       path: '/address',
       name: 'address',
       component: () => import('@/views/AddressListView.vue'),

@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
@@ -24,6 +25,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/v1/admin/category")
 @RequiredArgsConstructor
+@PreAuthorize("hasAuthority('category:view')")
 public class CategoryController {
 
     private final CategoryService categoryService;
@@ -36,12 +38,14 @@ public class CategoryController {
 
     @Operation(summary = "新增分类")
     @PostMapping
+    @PreAuthorize("hasAuthority('category:edit')")
     public R<Long> create(@Valid @RequestBody CategoryDTO dto) {
         return R.ok(categoryService.create(dto));
     }
 
     @Operation(summary = "修改分类")
     @PutMapping("/{id}")
+    @PreAuthorize("hasAuthority('category:edit')")
     public R<Void> update(@PathVariable Long id, @Valid @RequestBody CategoryDTO dto) {
         categoryService.update(id, dto);
         return R.ok();
@@ -49,6 +53,7 @@ public class CategoryController {
 
     @Operation(summary = "删除分类（有子分类或商品时拒绝）")
     @DeleteMapping("/{id}")
+    @PreAuthorize("hasAuthority('category:edit')")
     public R<Void> delete(@PathVariable Long id) {
         categoryService.delete(id);
         return R.ok();
@@ -56,6 +61,7 @@ public class CategoryController {
 
     @Operation(summary = "启用/禁用分类 status=0|1")
     @PutMapping("/{id}/status")
+    @PreAuthorize("hasAuthority('category:edit')")
     public R<Void> updateStatus(@PathVariable Long id, @RequestParam Integer status) {
         categoryService.updateStatus(id, status);
         return R.ok();

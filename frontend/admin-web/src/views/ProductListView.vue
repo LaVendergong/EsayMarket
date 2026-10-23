@@ -133,6 +133,13 @@ onMounted(async () => {
             <div class="muted">{{ row.subTitle || '-' }}</div>
           </template>
         </el-table-column>
+        <el-table-column label="类型" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.productType === 2 ? 'warning' : 'info'">
+              {{ row.productTypeText || '实物' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="categoryName" label="分类" width="120" />
         <el-table-column label="价格" width="110">
           <template #default="{ row }">¥{{ Number(row.price).toFixed(2) }}</template>

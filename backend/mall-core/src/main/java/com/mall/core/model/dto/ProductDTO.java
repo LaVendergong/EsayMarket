@@ -39,6 +39,19 @@ public class ProductDTO {
     /** 0-下架 1-上架，不传默认 1 */
     private Integer status;
 
+    /** 运费模板 id；不传 = 包邮（虚拟商品忽略此项） */
+    private Long freightTemplateId;
+
+    /** 1 实物 2 虚拟，不传默认实物 */
+    private Integer productType;
+
+    /** 虚拟商品的发放方式：1 卡密 2 外链（虚拟时必填） */
+    private Integer deliveryType;
+
+    /** 外链类商品必填 */
+    @Size(max = 512, message = "链接不能超过 512")
+    private String deliveryUrl;
+
     @NotEmpty(message = "至少需要一个 SKU")
     @Valid
     private List<SkuDTO> skus;

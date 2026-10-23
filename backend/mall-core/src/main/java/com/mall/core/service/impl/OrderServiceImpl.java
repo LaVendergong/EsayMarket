@@ -14,7 +14,9 @@ import com.mall.core.entity.Order;
 import com.mall.core.entity.OrderItem;
 import com.mall.core.entity.Product;
 import com.mall.core.entity.Sku;
+import com.mall.core.enums.ExpressCompany;
 import com.mall.core.enums.OrderStatus;
+import com.mall.core.enums.ProductType;
 import com.mall.core.mapper.CartMapper;
 import com.mall.core.mapper.OrderItemMapper;
 import com.mall.core.mapper.OrderMapper;
@@ -23,10 +25,18 @@ import com.mall.core.mapper.SkuMapper;
 import com.mall.core.metric.OrderMetrics;
 import com.mall.core.model.dto.CreateDirectOrderDTO;
 import com.mall.core.model.dto.CreateOrderDTO;
+import com.mall.core.model.dto.PreviewOrderDTO;
 import com.mall.core.model.vo.OrderCreateVO;
 import com.mall.core.model.vo.OrderItemVO;
+import com.mall.core.model.vo.OrderPreviewVO;
+import com.mall.core.model.vo.OrderExportRowVO;
 import com.mall.core.model.vo.OrderVO;
 import com.mall.core.service.AddressService;
+import com.mall.core.pricing.PricingLine;
+import com.mall.core.pricing.PricingResult;
+import com.mall.core.pricing.PricingService;
+import com.mall.core.service.CouponService;
+import com.mall.core.service.DigitalGoodsService;
 import com.mall.core.service.OrderService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -54,6 +64,9 @@ import java.util.stream.Collectors;
 public class OrderServiceImpl implements OrderService {
 
     private static final DateTimeFormatter ORDER_NO_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+    private static final DateTimeFormatter CSV_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    /** 导出上限：一次导出几十万行会把内存和 Excel 一起拖死 */
+    private static final int MAX_EXPORT_ROWS = 5000;
     private static final long MAX_PAGE_SIZE = 100L;
 
     private final OrderMapper orderMapper;
@@ -64,6 +77,9 @@ public class OrderServiceImpl implements OrderService {
     private final AddressService addressService;
     private final OrderProperties orderProperties;
     private final OrderMetrics orderMetrics;
+    private final PricingService pricingService;
+    private final CouponService couponService;
+    private final DigitalGoodsService digitalGoodsService;
 
     /** 客户端生成的幂等键最大长度，与 t_order.request_id 的列定义一致 */
     private static final int MAX_REQUEST_ID_LENGTH = 64;
@@ -96,7 +112,6 @@ public class OrderServiceImpl implements OrderService {
         if (carts.isEmpty()) {
             throw new BusinessException(ResultCode.CART_EMPTY);
         }
-        Address address = resolveAddress(userId, dto == null ? null : dto.getAddressId());
 
         List<OrderLine> lines = new ArrayList<>(carts.size());
         for (Cart c : carts) {
@@ -107,7 +122,9 @@ public class OrderServiceImpl implements OrderService {
             lines.add(new OrderLine(c.getProductId(), c.getSkuId(), qty));
         }
 
-        OrderCreateVO vo = placeOrder(userId, requestId, address, lines);
+        // 地址在 placeOrder 里解析：虚拟订单不需要地址，先知道商品类型才能决定要不要地址
+        OrderCreateVO vo = placeOrder(userId, requestId, dto == null ? null : dto.getAddressId(), lines,
+                dto == null ? null : dto.getUserCouponId());
         // 下单成功后移除购物车里已结算的（选中的）条目
         cartMapper.deleteChecked(userId);
         return vo;
@@ -136,12 +153,12 @@ public class OrderServiceImpl implements OrderService {
             return OrderCreateVO.from(existing);
         }
 
-        Address address = resolveAddress(userId, dto.getAddressId());
         Sku sku = skuMapper.selectById(dto.getSkuId());
         if (sku == null) {
             throw new BusinessException(ResultCode.SKU_NOT_FOUND);
         }
-        return placeOrder(userId, requestId, address, List.of(new OrderLine(sku.getProductId(), sku.getId(), qty)));
+        return placeOrder(userId, requestId, dto.getAddressId(),
+                List.of(new OrderLine(sku.getProductId(), sku.getId(), qty)), dto.getUserCouponId());
     }
 
     /**
@@ -164,14 +181,20 @@ public class OrderServiceImpl implements OrderService {
      * 真正建单：校验商品/SKU → 原子锁库存 → 落订单与明细 → 快照收货信息。
      * 购物车相关的事（读选中项、清选中项）由调用方处理，所以这个方法被两个入口共用。
      */
-    private OrderCreateVO placeOrder(Long userId, String requestId, Address address, List<OrderLine> lines) {
-        List<OrderItem> items = new ArrayList<>(lines.size());
-        BigDecimal total = BigDecimal.ZERO;
+    private OrderCreateVO placeOrder(Long userId, String requestId, Long addressId,
+                                     List<OrderLine> lines, Long userCouponId) {
         // 按 SKU 升序加锁：多个事务锁同一批 SKU 时加锁顺序一致，能显著减少死锁
         // （死锁本身的兜底是 DeadlockRetry，见 OrderController）
         List<OrderLine> ordered = lines.stream()
                 .sorted(Comparator.comparing(OrderLine::skuId))
                 .toList();
+
+        // ① 先查商品判类型：虚拟订单不要地址，且**不能和实物混买**——
+        //    混在一起后运费、发货时机、售后规则全部分叉，一单里很难讲清楚
+        List<Product> products = new ArrayList<>(ordered.size());
+        List<Sku> skus = new ArrayList<>(ordered.size());
+        boolean hasVirtual = false;
+        boolean hasPhysical = false;
         for (OrderLine line : ordered) {
             Product p = productMapper.selectById(line.productId());
             if (p == null) {
@@ -184,6 +207,27 @@ public class OrderServiceImpl implements OrderService {
             if (sku == null || !Objects.equals(sku.getProductId(), p.getId())) {
                 throw new BusinessException(ResultCode.SKU_NOT_FOUND);
             }
+            if (ProductType.of(p.getProductType()) == ProductType.VIRTUAL) {
+                hasVirtual = true;
+            } else {
+                hasPhysical = true;
+            }
+            products.add(p);
+            skus.add(sku);
+        }
+        if (hasVirtual && hasPhysical) {
+            throw new BusinessException(ResultCode.MIXED_ORDER_NOT_ALLOWED);
+        }
+        boolean virtual = hasVirtual;
+        Address address = virtual ? null : resolveAddress(userId, addressId);
+
+        // ② 锁库存 + 构造订单明细
+        List<OrderItem> items = new ArrayList<>(ordered.size());
+        List<PricingLine> pricingLines = new ArrayList<>(ordered.size());
+        for (int i = 0; i < ordered.size(); i++) {
+            OrderLine line = ordered.get(i);
+            Product p = products.get(i);
+            Sku sku = skus.get(i);
             // 防超卖的关键：条件 UPDATE 原子锁库存，失败即回滚整单
             if (skuMapper.lockStock(sku.getId(), line.quantity()) == 0) {
                 // 计数器要在抛异常前打：异常会让事务回滚，但指标不该跟着消失
@@ -202,20 +246,46 @@ public class OrderServiceImpl implements OrderService {
             item.setQuantity(line.quantity());
             item.setTotalAmount(lineAmount);
             items.add(item);
-            total = total.add(lineAmount);
+
+            // 计价只信库里的价格与商品上绑的运费模板；虚拟商品强制无运费
+            Long freightTemplateId = virtual ? null : p.getFreightTemplateId();
+            pricingLines.add(new PricingLine(p.getId(), sku.getId(), line.quantity(),
+                    sku.getPrice() == null ? BigDecimal.ZERO : sku.getPrice(), freightTemplateId));
+        }
+
+        // 服务端重新算一遍：商品金额 → 运费 → 优惠 → 应付，并把优惠分摊到每行。
+        // 绝不采信前端传来的任何金额（那样改个请求就能 1 分钱下单）。
+        PricingResult pricing = pricingService.calculate(pricingLines, userId, userCouponId);
+
+        for (int i = 0; i < items.size(); i++) {
+            PricingResult.LineShare share = pricing.getLines().get(i);
+            items.get(i).setDiscountAmount(share.getDiscountAmount());
+            items.get(i).setPayAmount(share.getPayAmount());
         }
 
         Order order = new Order();
         order.setRequestId(requestId);
         order.setUserId(userId);
-        order.setTotalAmount(total);
-        order.setPayAmount(total);
+        order.setTotalAmount(pricing.getGoodsAmount());
+        order.setFreightAmount(pricing.getFreightAmount());
+        order.setDiscountAmount(pricing.getDiscountAmount());
+        order.setPayAmount(pricing.getPayAmount());
+        order.setUserCouponId(pricing.getUserCouponId());
         order.setStatus(OrderStatus.UNPAID.getCode());
-        order.setReceiver(address.getReceiver());
-        order.setReceiverPhone(address.getPhone());
-        order.setReceiverAddr(joinAddress(address));
+        // 类型快照：商品之后从虚拟改回实物，历史订单的发货/售后规则也不能跟着变
+        order.setOrderType(virtual ? ProductType.VIRTUAL.getCode() : ProductType.PHYSICAL.getCode());
+        if (address != null) {
+            order.setReceiver(address.getReceiver());
+            order.setReceiverPhone(address.getPhone());
+            order.setReceiverAddr(joinAddress(address));
+        }
         order.setExpireTime(LocalDateTime.now().plusMinutes(orderProperties.getExpireMinutes()));
         insertOrder(order);
+
+        // 券在这里锁定（status 0→1 + 绑 order_id）。并发用同一张券只有一个能成功。
+        if (pricing.getUserCouponId() != null) {
+            couponService.lock(userId, pricing.getUserCouponId(), order.getId());
+        }
 
         for (OrderItem item : items) {
             item.setOrderId(order.getId());
@@ -291,6 +361,17 @@ public class OrderServiceImpl implements OrderService {
         for (Map.Entry<Long, Integer> e : qtyByProduct.entrySet()) {
             productMapper.incrementSales(e.getKey(), e.getValue());
         }
+
+        // 虚拟商品没有物流：支付成功即发放，发放成功直接置「已完成」。
+        // 发放失败不抛异常（钱已经收了，不能让支付落账回滚），订单停在「已支付」等后台补发。
+        if (ProductType.of(order.getOrderType()) == ProductType.VIRTUAL) {
+            int granted = digitalGoodsService.grant(order, items);
+            if (granted > 0) {
+                transition(orderId, null, OrderStatus.PAID, OrderStatus.FINISHED, false);
+            } else {
+                log.error("[order] virtual order paid but nothing granted, orderNo={}", order.getOrderNo());
+            }
+        }
     }
 
     /** 订单是否已经处在「付过钱」之后的状态（重复回调时用来判定幂等） */
@@ -307,6 +388,114 @@ public class OrderServiceImpl implements OrderService {
                 || s == OrderStatus.REFUNDED.getCode();
     }
 
+    /**
+     * 结算试算：只读，不锁库存、不改任何数据。
+     *
+     * <p>金额必须和真正下单走同一套计价（{@link PricingService}），否则会出现
+     * 「结算页 90 元、提交后 100 元」。这里算出来的数字只是给前端展示，下单时服务端会再算一遍。
+     */
+    @Override
+    public OrderPreviewVO preview(Long userId, PreviewOrderDTO dto) {
+        Long userCouponId = dto == null ? null : dto.getUserCouponId();
+        List<OrderLine> lines;
+        if (dto != null && dto.getSkuId() != null) {
+            // 立即购买：只看这一个 SKU，不碰购物车
+            int qty = dto.getQuantity() == null ? 1 : dto.getQuantity();
+            if (qty < 1) {
+                throw new BusinessException(ResultCode.VALIDATE_FAILED, "购买数量不合法");
+            }
+            Sku sku = skuMapper.selectById(dto.getSkuId());
+            if (sku == null) {
+                throw new BusinessException(ResultCode.SKU_NOT_FOUND);
+            }
+            lines = List.of(new OrderLine(sku.getProductId(), sku.getId(), qty));
+        } else {
+            // 购物车结算：与 create() 同样的筛选条件
+            List<Cart> carts = cartMapper.selectList(Wrappers.<Cart>lambdaQuery()
+                    .eq(Cart::getUserId, userId)
+                    .eq(Cart::getChecked, 1)
+                    .orderByAsc(Cart::getId));
+            if (carts.isEmpty()) {
+                throw new BusinessException(ResultCode.CART_EMPTY);
+            }
+            lines = new ArrayList<>(carts.size());
+            for (Cart c : carts) {
+                int qty = c.getQuantity() == null ? 0 : c.getQuantity();
+                if (qty < 1) {
+                    throw new BusinessException(ResultCode.VALIDATE_FAILED, "购买数量不合法");
+                }
+                lines.add(new OrderLine(c.getProductId(), c.getSkuId(), qty));
+            }
+        }
+
+        List<PricingLine> pricingLines = new ArrayList<>(lines.size());
+        List<OrderPreviewVO.Item> items = new ArrayList<>(lines.size());
+        boolean hasVirtual = false;
+        boolean hasPhysical = false;
+        for (OrderLine line : lines) {
+            Product p = productMapper.selectById(line.productId());
+            if (p == null) {
+                throw new BusinessException(ResultCode.PRODUCT_NOT_FOUND);
+            }
+            if (p.getStatus() == null || p.getStatus() == 0) {
+                throw new BusinessException(ResultCode.PRODUCT_OFF_SHELF, "商品已下架：" + p.getName());
+            }
+            Sku sku = skuMapper.selectById(line.skuId());
+            if (sku == null || !Objects.equals(sku.getProductId(), p.getId())) {
+                throw new BusinessException(ResultCode.SKU_NOT_FOUND);
+            }
+            BigDecimal price = sku.getPrice() == null ? BigDecimal.ZERO : sku.getPrice();
+            boolean isVirtual = ProductType.of(p.getProductType()) == ProductType.VIRTUAL;
+            if (isVirtual) {
+                hasVirtual = true;
+            } else {
+                hasPhysical = true;
+            }
+            pricingLines.add(new PricingLine(p.getId(), sku.getId(), line.quantity(), price,
+                    isVirtual ? null : p.getFreightTemplateId()));
+
+            OrderPreviewVO.Item it = new OrderPreviewVO.Item();
+            it.setProductId(p.getId());
+            it.setSkuId(sku.getId());
+            it.setProductName(p.getName());
+            it.setImage(StringUtils.hasText(sku.getImage()) ? sku.getImage() : p.getMainImage());
+            it.setSpec(sku.getSpec());
+            it.setPrice(price);
+            it.setQuantity(line.quantity());
+            items.add(it);
+        }
+
+        // 和下单保持同一套规则：混单直接拒绝，别等提交时才报错
+        if (hasVirtual && hasPhysical) {
+            throw new BusinessException(ResultCode.MIXED_ORDER_NOT_ALLOWED);
+        }
+
+        PricingResult pricing = pricingService.calculate(pricingLines, userId, userCouponId);
+
+        // 分摊结果与入参同序，按下标回填即可
+        for (int i = 0; i < items.size(); i++) {
+            PricingResult.LineShare share = pricing.getLines().get(i);
+            OrderPreviewVO.Item it = items.get(i);
+            it.setLineAmount(share.getLineAmount());
+            it.setDiscountAmount(share.getDiscountAmount());
+            it.setPayAmount(share.getPayAmount());
+        }
+
+        OrderPreviewVO vo = new OrderPreviewVO();
+        vo.setGoodsAmount(pricing.getGoodsAmount());
+        vo.setFreightAmount(pricing.getFreightAmount());
+        vo.setDiscountAmount(pricing.getDiscountAmount());
+        vo.setPayAmount(pricing.getPayAmount());
+        vo.setUserCouponId(pricing.getUserCouponId());
+        // 前台据此决定要不要渲染地址块（虚拟订单不需要收货地址）
+        vo.setOrderType(hasVirtual ? ProductType.VIRTUAL.getCode() : ProductType.PHYSICAL.getCode());
+        vo.setOrderTypeText(ProductType.textOf(vo.getOrderType()));
+        vo.setItems(items);
+        // 券的可用性依赖「当前商品金额」，所以只能算完价再查
+        vo.setCoupons(couponService.availableFor(userId, pricing.getGoodsAmount()));
+        return vo;
+    }
+
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void cancel(Long userId, Long orderId) {
@@ -316,6 +505,8 @@ public class OrderServiceImpl implements OrderService {
             throw new BusinessException(ResultCode.ORDER_STATUS_ERROR, "只有待支付订单才能取消");
         }
         release(items);
+        // 券退回：订单都没了，券不能跟着作废
+        couponService.releaseByOrder(orderId);
     }
 
     @Override
@@ -345,10 +536,46 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
-    public void ship(Long orderId) {
+    @Transactional(rollbackFor = Exception.class)
+    public void regrantDigital(Long orderId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) {
+            throw new BusinessException(ResultCode.ORDER_NOT_FOUND);
+        }
+        if (ProductType.of(order.getOrderType()) != ProductType.VIRTUAL) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED, "该订单不是虚拟商品订单");
+        }
+        if (!Objects.equals(order.getStatus(), OrderStatus.PAID.getCode())) {
+            throw new BusinessException(ResultCode.ORDER_STATUS_ERROR, "只有「已支付」的虚拟订单才能补发");
+        }
+        int granted = digitalGoodsService.grant(order, itemsOf(orderId));
+        if (granted == 0) {
+            throw new BusinessException(ResultCode.CARD_KEY_REQUIRED, "补发失败：卡密不足或商品未配置发放方式");
+        }
+        transition(orderId, null, OrderStatus.PAID, OrderStatus.FINISHED, false);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void ship(Long orderId, String company, String shipNo) {
+        ExpressCompany express = ExpressCompany.of(company);
+        if (express == null) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED, "请选择快递公司");
+        }
+        String no = shipNo == null ? "" : shipNo.trim();
+        if (!no.matches("[A-Za-z0-9-]{4,64}")) {
+            throw new BusinessException(ResultCode.VALIDATE_FAILED, "运单号只能是 4-64 位字母、数字或短横线");
+        }
+        // 状态机照旧走 transition（保证和其它入口一致），物流字段单独写
         if (transition(orderId, null, OrderStatus.PAID, OrderStatus.SHIPPED, false) == 0) {
             throw new BusinessException(ResultCode.ORDER_STATUS_ERROR, "只有已支付订单才能发货");
         }
+        Order upd = new Order();
+        upd.setId(orderId);
+        upd.setShipCompany(express.name());
+        upd.setShipNo(no);
+        upd.setShipTime(LocalDateTime.now());
+        orderMapper.updateById(upd);
     }
 
     @Override
@@ -359,6 +586,55 @@ public class OrderServiceImpl implements OrderService {
             throw new BusinessException(ResultCode.ORDER_STATUS_ERROR, "只有待支付订单才能关闭");
         }
         release(items);
+        // 后台关单和用户取消一样要把券退回，否则券会永远卡在这张死单上
+        couponService.releaseByOrder(orderId);
+    }
+
+    @Override
+    public String exportCsv(Integer status, String keyword, int limit) {
+        int n = Math.min(Math.max(limit, 1), MAX_EXPORT_ROWS);
+        List<OrderExportRowVO> rows = orderMapper.listForExport(status,
+                StringUtils.hasText(keyword) ? keyword.trim() : null, n);
+
+        // BOM 必须放在最前面：没有它 Excel 打开中文是乱码（Windows 默认按 GBK 解析）
+        StringBuilder sb = new StringBuilder("\uFEFF");
+        sb.append("订单号,下单时间,支付时间,状态,类型,用户ID,商品金额,运费,优惠,实付,快递公司,运单号,收货人,商品明细\r\n");
+        for (OrderExportRowVO r : rows) {
+            sb.append(csvCell(r.getOrderNo())).append(',')
+                    .append(csvCell(fmtCsvTime(r.getCreateTime()))).append(',')
+                    .append(csvCell(fmtCsvTime(r.getPayTime()))).append(',')
+                    .append(csvCell(OrderStatus.textOf(r.getStatus()))).append(',')
+                    .append(csvCell(ProductType.textOf(r.getOrderType()))).append(',')
+                    .append(csvCell(r.getUserId() == null ? "" : String.valueOf(r.getUserId()))).append(',')
+                    .append(csvCell(moneyText(r.getTotalAmount()))).append(',')
+                    .append(csvCell(moneyText(r.getFreightAmount()))).append(',')
+                    .append(csvCell(moneyText(r.getDiscountAmount()))).append(',')
+                    .append(csvCell(moneyText(r.getPayAmount()))).append(',')
+                    .append(csvCell(ExpressCompany.textOf(r.getShipCompany()))).append(',')
+                    .append(csvCell(r.getShipNo())).append(',')
+                    .append(csvCell(r.getReceiver())).append(',')
+                    .append(csvCell(r.getItems()))
+                    .append("\r\n");
+        }
+        return sb.toString();
+    }
+
+    /** CSV 单元格转义：含逗号/引号/换行时用双引号包起来，内部引号双写 */
+    private static String csvCell(String value) {
+        if (value == null) {
+            return "";
+        }
+        String v = value.replace("\"", "\"\"");
+        boolean needQuote = v.contains(",") || v.contains("\"") || v.contains("\n") || v.contains("\r");
+        return needQuote ? "\"" + v + "\"" : v;
+    }
+
+    private static String fmtCsvTime(LocalDateTime time) {
+        return time == null ? "" : time.format(CSV_TIME_FORMAT);
+    }
+
+    private static String moneyText(BigDecimal v) {
+        return v == null ? "0.00" : v.setScale(2, RoundingMode.HALF_UP).toPlainString();
     }
 
     @Override
@@ -376,6 +652,7 @@ public class OrderServiceImpl implements OrderService {
                 continue;
             }
             release(itemsOf(o.getId()));
+            couponService.releaseByOrder(o.getId());
             closed++;
         }
         return closed;

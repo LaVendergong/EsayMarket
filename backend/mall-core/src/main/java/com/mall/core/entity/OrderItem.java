@@ -34,4 +34,10 @@ public class OrderItem extends BaseEntity {
     private Integer quantity;
 
     private BigDecimal totalAmount;
+
+    /** 本行分摊到的优惠（订单级优惠按商品金额比例摊下来） */
+    private BigDecimal discountAmount;
+
+    /** 本行实付 = totalAmount - discountAmount */
+    private BigDecimal payAmount;
 }

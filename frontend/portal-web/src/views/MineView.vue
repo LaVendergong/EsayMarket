@@ -65,6 +65,9 @@ function goto(path: string) {
 
     <van-cell-group inset class="block">
       <van-cell title="我的订单" is-link @click="goto('/orders')" />
+      <van-cell title="我的收藏" is-link @click="goto('/favorites')" />
+      <van-cell title="我的卡券" is-link @click="goto('/digital')" />
+      <van-cell title="我的优惠券" is-link @click="goto('/coupon')" />
       <van-cell title="我的售后" is-link @click="goto('/after-sale')" />
       <van-cell title="收货地址" is-link @click="goto('/address')" />
       <van-cell title="购物车" is-link @click="goto('/cart')" />

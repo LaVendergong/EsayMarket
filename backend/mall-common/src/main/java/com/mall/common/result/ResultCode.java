@@ -47,7 +47,21 @@ public enum ResultCode {
     PAY_NOTIFY_INVALID(4005, "支付回调校验失败"),
     REFUND_FAILED(4006, "渠道退款失败"),
     REFUND_NOT_SUPPORTED(4007, "原支付渠道不支持自动退款"),
-    PAY_QUERY_NOT_SUPPORTED(4008, "该渠道不支持支付查询");
+    PAY_QUERY_NOT_SUPPORTED(4008, "该渠道不支持支付查询"),
+    COUPON_NOT_FOUND(7001, "优惠券不存在"),
+    COUPON_UNAVAILABLE(7002, "优惠券不可用（已使用或已过期）"),
+    COUPON_THRESHOLD_NOT_MET(7003, "未达到优惠券使用门槛"),
+    COUPON_SOLD_OUT(7004, "优惠券已领完"),
+    COUPON_ALREADY_RECEIVED(7005, "该优惠券已领取过"),
+    FREIGHT_TEMPLATE_NOT_FOUND(7006, "运费模板不存在"),
+    MIXED_ORDER_NOT_ALLOWED(7101, "实物与虚拟商品不能一起下单，请分开结算"),
+    VIRTUAL_GOODS_CONFIG_ERROR(7102, "虚拟商品配置不完整（发放方式/外链地址/卡密库存）"),
+    DIGITAL_GRANT_NOT_FOUND(7103, "凭证不存在"),
+    DIGITAL_GRANT_UNAVAILABLE(7104, "凭证不可用（已作废或发放失败）"),
+    CARD_KEY_REQUIRED(7105, "卡密类商品必须先导入卡密"),
+    REVIEW_ALREADY_SUBMITTED(7201, "该商品已评价过"),
+    REVIEW_NOT_FOUND(7202, "评价不存在"),
+    UPLOAD_INVALID(7301, "图片上传失败");
 
     private final int code;
     private final String message;
